@@ -1,10 +1,12 @@
 package com.nemap.android.core
 
+import android.content.Context
 import com.nemap.android.web.Engine
 import kotlinx.coroutines.delay
+import org.json.JSONArray
 import org.json.JSONObject
 
-/** Une image jointe à un message (déjà décodée depuis base64 ou HTTP). */
+/** Une pièce jointe multimodale (image ou fichier, décodé depuis base64 ou HTTP). */
 class ImagePart(val mime: String, val name: String, val bytes: ByteArray)
 
 data class Msg(
@@ -33,6 +35,7 @@ object DeepSeek {
     private const val UPLOAD_SILENCE_MS = 3_000L
     /** Taille d'un morceau de base64 transféré par evaluateJavascript. */
     private const val CHUNK = 96_000
+    private const val MAX_CONTINUATIONS = 12
 
     /** Construit le prompt envoyé à la page à partir de l'historique OpenAI. */
     fun buildPrompt(messages: List<Msg>): String {
@@ -60,7 +63,9 @@ object DeepSeek {
                 else -> sb.append(content).append("\n\n")
             }
         }
-        return sb.toString().trim().also { if (it.length > 40_000) throw NemApiException(NemApiException.PROVIDER_NOT_CONFIGURED, "Historique trop long (${it.length} caractères).") }
+        // Pas de plafond arbitraire sur l'historique. Les prompts longs passent
+        // par Engine.setPrompt(), qui les injecte en morceaux sans troncature.
+        return sb.toString().trim()
     }
 
     private fun isCancelled(token: () -> Boolean) = token()
@@ -72,11 +77,15 @@ object DeepSeek {
     suspend fun chat(
         messages: List<Msg>,
         onDelta: (String) -> Unit,
-        shouldCancel: () -> Boolean = { false }
+        shouldCancel: () -> Boolean = { false },
+        context: Context? = null,
+        rawMessages: JSONArray? = null,
+        tools: JSONArray? = null,
+        qwenIncremental: Boolean = false
     ): String {
         if (!AppState.busy.compareAndSet(false, true)) throw NemApiException.busy()
         try {
-            return run(messages, onDelta, shouldCancel)
+            return run(messages, onDelta, shouldCancel, context, rawMessages, tools, qwenIncremental)
         } finally {
             AppState.busy.set(false)
         }
@@ -85,7 +94,11 @@ object DeepSeek {
     private suspend fun run(
         messages: List<Msg>,
         onDelta: (String) -> Unit,
-        shouldCancel: () -> Boolean
+        shouldCancel: () -> Boolean,
+        context: Context?,
+        rawMessages: JSONArray?,
+        tools: JSONArray?,
+        qwenIncremental: Boolean
     ): String {
         if (!com.nemap.android.web.WebViewHost.isCreated) {
             throw NemApiException.notReady("Le navigateur intégré n'est pas ouvert : ouvre l'app NemApi puis l'onglet du provider.")
@@ -101,9 +114,13 @@ object DeepSeek {
             )
         }
 
-        val prompt = buildPrompt(messages)
+        val qwenPlan = if (qwenIncremental && context != null && rawMessages != null) {
+            val url = try { Engine.currentUrl() } catch (_: Throwable) { AppState.pageUrl }
+            QwenContext.plan(context, rawMessages, tools, QwenContext.conversationKey(url))
+        } else null
+        val prompt = qwenPlan?.prompt ?: buildPrompt(messages)
         AppState.promptChars.addAndGet(prompt.length.toLong())
-        NemLog.i("dom", "prompt de ${prompt.length} caractères")
+        NemLog.i("dom", "prompt de ${prompt.length} caractères" + if (qwenPlan != null) " (${qwenPlan.mode})" else "")
 
         Engine.resetStream()
 
@@ -113,7 +130,7 @@ object DeepSeek {
         if (images.isNotEmpty()) attachImages(images, shouldCancel)
 
         // 1) écrire le prompt — avec vérification que la page l'a bien pris
-        val set = Engine.adapter("setPrompt", prompt, 30_000)
+        val set = Engine.setPrompt(prompt)
         if (!set.optBoolean("ok")) {
             throw NemApiException(
                 NemApiException.SELECTOR_MISSING,
@@ -138,8 +155,35 @@ object DeepSeek {
         }
         NemLog.i("dom", "envoi déclenché via ${sub.optString("via")}")
 
-        // 4) suivre la réponse
-        return follow(prompt, onDelta, shouldCancel)
+        // 4) suivre la réponse, puis actionner « Continue » si le modèle a
+        // atteint sa limite de sortie. Chaque reprise ouvre un nouveau flux;
+        // son texte est dédoublonné avant d'être envoyé au client OpenAI.
+        var answer = follow(prompt, onDelta, shouldCancel)
+        var continuationCount = 0
+        while (continuationCount < MAX_CONTINUATIONS) {
+            val available = waitContinueButton(shouldCancel)
+            if (!available) break
+            if (isCancelled(shouldCancel)) throw NemApiException.cancelled()
+            Engine.resetStream()
+            val clicked = Engine.adapter("continueGeneration")
+            if (!clicked.optBoolean("ok")) break
+            continuationCount++
+            NemLog.i("dom", "DeepSeek a affiché « Continue » → reprise ${continuationCount}/${MAX_CONTINUATIONS}")
+            val tail = StringBuilder()
+            follow(prompt, onDelta = { delta -> tail.append(delta) }, shouldCancel = shouldCancel)
+            val previous = answer
+            answer = appendContinuation(answer, tail.toString())
+            if (answer.length > previous.length) onDelta(answer.substring(previous.length))
+        }
+        if (continuationCount == MAX_CONTINUATIONS && waitContinueButton(shouldCancel)) {
+            NemLog.e("dom", "DeepSeek demande encore une reprise après $MAX_CONTINUATIONS continuations")
+            throw NemApiException.timeout("DeepSeek a encore affiché « Continue » après $MAX_CONTINUATIONS reprises. La réponse est interrompue par la limite de sortie de la page.")
+        }
+        if (qwenPlan != null && context != null) {
+            val finalUrl = try { Engine.currentUrl() } catch (_: Throwable) { AppState.pageUrl }
+            QwenContext.commit(context, qwenPlan, answer, QwenContext.conversationKey(finalUrl))
+        }
+        return answer
     }
 
     /**
@@ -167,7 +211,7 @@ object DeepSeek {
                 val r = Engine.adapter("attachChunk", payload, 30_000)
                 if (!r.optBoolean("ok")) throw NemApiException(
                     NemApiException.PROVIDER_NOT_CONFIGURED,
-                    "Transfert de l'image interrompu (${r.optString("reason")})."
+                    "Transfert de la pièce jointe interrompu (${r.optString("reason")})."
                 )
                 off = end
             }
@@ -176,18 +220,18 @@ object DeepSeek {
 
         val commit = Engine.adapter("attachCommit", null, 30_000)
         if (!commit.optBoolean("ok")) {
-            NemLog.w("dom", "dépôt des images refusé (${commit.optString("reason")}) → envoi du texte seul")
+            NemLog.w("dom", "dépôt des pièces jointes refusé (${commit.optString("reason")}) → envoi du texte seul")
             Engine.adapter("attachBegin")
             return
         }
         // `in_input` retombe souvent à 0 : la page vide l'input dès qu'elle a lu
-        // le fichier. C'est `wanted` qui dit combien d'images sont parties.
+        // les fichiers. C'est `wanted` qui donne le nombre de pièces transmises.
         val inInput = commit.optInt("in_input")
         val wanted = commit.optInt("wanted", 0)
         NemLog.i(
             "dom",
-            if (inInput > 0) "image(s) déposée(s) : $inInput fichier(s) dans l'entrée"
-            else "image(s) déposée(s) : $wanted transmise(s) au composeur"
+            if (inInput > 0) "pièce(s) jointe(s) déposée(s) : $inInput fichier(s) dans l'entrée"
+            else "pièce(s) jointe(s) déposée(s) : $wanted fichier(s) transmis au composeur"
         )
 
         waitUpload(shouldCancel)
@@ -252,6 +296,31 @@ object DeepSeek {
             delay(POLL_MS)
         }
         NemLog.w("dom", "téléversement non confirmé après $UPLOAD_MS ms ($lastNote) — envoi quand même")
+    }
+
+    private suspend fun waitContinueButton(shouldCancel: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + 2_000L
+        while (System.currentTimeMillis() < deadline) {
+            if (isCancelled(shouldCancel)) throw NemApiException.cancelled()
+            try {
+                if (Engine.adapter("continueAvailable", timeoutMs = 5_000).optBoolean("available")) return true
+            } catch (_: Throwable) {
+            }
+            delay(250)
+        }
+        return false
+    }
+
+    /** Concatène une reprise en retirant son éventuel recouvrement de début. */
+    private fun appendContinuation(previous: String, next: String): String {
+        if (next.isBlank()) return previous
+        val max = minOf(previous.length, next.length, 4_000)
+        for (overlap in max downTo 16) {
+            if (previous.regionMatches(previous.length - overlap, next, 0, overlap, ignoreCase = false)) {
+                return previous + next.substring(overlap)
+            }
+        }
+        return previous + next
     }
 
     private suspend fun waitSendReady(budgetMs: Long, shouldCancel: () -> Boolean): Boolean {

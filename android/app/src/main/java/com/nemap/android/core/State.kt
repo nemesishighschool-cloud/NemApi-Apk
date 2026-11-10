@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicLong
 object AppState {
 
     const val API_PORT = 8090
-    const val VERSION = "1.0.2"
+    const val VERSION = "1.1.0"
 
     @Volatile var serviceRunning = false
     @Volatile var startedAt: Long = 0L

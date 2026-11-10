@@ -109,6 +109,27 @@ object Engine {
         return evalJson(js, timeoutMs)
     }
 
+    /**
+     * Écrit les prompts longs par morceaux sous le plafond pratique du pont
+     * evaluateJavascript (sans tronquer ni imposer de taille maximale métier).
+     */
+    suspend fun setPrompt(prompt: String): JSONObject {
+        adapter("promptBegin", timeoutMs = 10_000)
+        var off = 0
+        val chunkSize = 18_000
+        while (off < prompt.length) {
+            var end = minOf(off + chunkSize, prompt.length)
+            // Ne coupe pas une paire UTF-16 entre ses deux demi-surrogates.
+            if (end < prompt.length && end > off && Character.isHighSurrogate(prompt[end - 1]) && Character.isLowSurrogate(prompt[end])) end--
+            val r = adapter("promptChunk", prompt.substring(off, end), 30_000)
+            if (!r.optBoolean("ok")) return r
+            off = end
+        }
+        return adapter("promptCommit", timeoutMs = 90_000)
+    }
+
+    suspend fun currentUrl(): String = evalJs("location.href", 5_000) ?: ""
+
     /** État du flux observé par le hook réseau. */
     suspend fun streamState(): JSONObject =
         evalJson("window.__nap ? window.__nap.state() : JSON.stringify({started:false})")

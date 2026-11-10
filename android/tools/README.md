@@ -14,6 +14,8 @@ adb forward tcp:8090 tcp:8090
 | `api_tests.py` | batterie API : 7 tests (409 `provider_busy`, annulation, gros contexte, `/v1/responses`, 400) |
 | `latency_stats.py` | campagne de latence : 6 prompts, TTFT, total, débit, synthèse |
 | `image_test.py` | envoi d'images : PNG généré, 4 quadrants, stream et non-stream, usage |
+| `pdf_test.py` | PDF `file_data` natif, Chat Completions et Responses; PDF 9 pages lu en un seul fichier, erreurs explicites |
+| `qwen_incremental_test.py` | Qwen Code : contexte initial >64k puis deux tours incrémentaux |
 | `agent_compat.py` | compatibilité agents de codage : `/v1/models`, `system` + code, `tools`, contexte long, `/v1/responses` |
 | `restore-session.py` | réinjection des cookies DeepSeek sauvegardés |
 

@@ -52,6 +52,7 @@
   var SEND_SVG_PATH_RE = /M8\.3125|M13\.12\s*19\.98|M12\s*5\.25|paper|send|arrow/i;
 
   var ATT = { items: [], cur: null };
+  var PROMPT_BUFFER = "";
 
   function J(o) {
     try {
@@ -110,6 +111,17 @@
     if (el.disabled) return true;
     var cls = (el.className && String(el.className)) || "";
     return /\bdisabled\b/i.test(cls);
+  }
+
+  function continueLabel(el) {
+    if (!el) return "";
+    var accept = /^(continue|continue generating|continue response|continue generation|继续|继续生成|继续回答)$/i;
+    var candidates = [el.innerText, el.textContent, el.getAttribute("aria-label"), el.getAttribute("title")];
+    for (var i = 0; i < candidates.length; i++) {
+      var label = String(candidates[i] || "").replace(/\s+/g, " ").trim();
+      if (accept.test(label)) return label;
+    }
+    return "";
   }
 
   function isSendButton(el) {
@@ -323,6 +335,24 @@
       });
     },
 
+    // Le prompt agent peut faire plusieurs centaines de ko. Le pont Android
+    // envoie des fragments modestes, puis on écrit une seule fois dans React.
+    promptBegin: function () {
+      PROMPT_BUFFER = "";
+      return J({ ok: true });
+    },
+
+    promptChunk: function (chunk) {
+      PROMPT_BUFFER += String(chunk || "");
+      return J({ ok: true, len: PROMPT_BUFFER.length });
+    },
+
+    promptCommit: function () {
+      var value = PROMPT_BUFFER;
+      PROMPT_BUFFER = "";
+      return this.setPrompt(value);
+    },
+
     setPrompt: function (text) {
       var want = String(text || "");
       var cands = inputCandidates();
@@ -377,6 +407,33 @@
         } catch (e) {}
       }
       return J({ ok: false, reason: "send_missing" });
+    },
+
+    /** Détecte le bouton de reprise laissé par DeepSeek après la limite de sortie. */
+    continueAvailable: function () {
+      var nodes = document.querySelectorAll("button,[role='button']");
+      for (var i = nodes.length - 1; i >= 0; i--) {
+        var el = nodes[i];
+        if (!visible(el) || disabled(el)) continue;
+        var label = continueLabel(el);
+        if (label)
+          return J({ available: true, label: label });
+      }
+      return J({ available: false });
+    },
+
+    /** Clique uniquement sur un bouton de reprise explicite (pas sur Envoyer). */
+    continueGeneration: function () {
+      var nodes = document.querySelectorAll("button,[role='button']");
+      for (var i = nodes.length - 1; i >= 0; i--) {
+        var el = nodes[i];
+        if (!visible(el) || disabled(el)) continue;
+        var label = continueLabel(el);
+        if (label) {
+          try { el.click(); return J({ ok: true, label: label }); } catch (e) {}
+        }
+      }
+      return J({ ok: false, reason: "continue_missing" });
     },
 
     stop: function () {

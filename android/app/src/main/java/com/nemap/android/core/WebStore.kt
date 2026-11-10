@@ -148,6 +148,23 @@ object WebStore {
 
     fun agentEnabled(ctx: Context, id: String): Boolean = agentState(id).optBoolean("enabled", false)
 
+    fun agentFeatureEnabled(ctx: Context, id: String, feature: String): Boolean {
+        val state = agentState(id)
+        val overrides = state.optJSONObject("features")
+        if (overrides?.has(feature) == true) return overrides.optBoolean(feature)
+        val agents = catalogJson(ctx)
+        for (i in 0 until agents.length()) {
+            val a = agents.optJSONObject(i) ?: continue
+            if (a.optString("id") != id) continue
+            val fs = a.optJSONArray("features") ?: continue
+            for (j in 0 until fs.length()) {
+                val f = fs.optJSONObject(j) ?: continue
+                if (f.optString("id") == feature) return f.optBoolean("enabled", true)
+            }
+        }
+        return false
+    }
+
     private fun detectedFor(id: String): JSONObject {
         val n = prefs()?.getInt("agent_req_$id", 0) ?: 0
         val at = prefs()?.getLong("agent_at_$id", 0L) ?: 0L

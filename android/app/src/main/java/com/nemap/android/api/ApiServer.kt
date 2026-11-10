@@ -164,6 +164,7 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
 
         var contentLength = 0
         var authorization = ""
+        val requestHeaders = linkedMapOf<String, String>()
         while (true) {
             val line = readLine(input) ?: break
             if (line.isEmpty()) break
@@ -171,6 +172,7 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
             if (idx > 0) {
                 val name = line.substring(0, idx).trim().lowercase()
                 val value = line.substring(idx + 1).trim()
+                requestHeaders[name] = value
                 if (name == "content-length") contentLength = value.toIntOrNull() ?: 0
                 if (name == "authorization") authorization = value
             }
@@ -273,9 +275,9 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
                 sendJson(out, 401, errorJson("invalid_api_key", "Clé API manquante ou invalide."))
             path == "/v1/models" || path == "/models" -> sendJson(out, 200, modelsJson())
             path == "/v1/chat/completions" || path == "/chat/completions" ->
-                if (method == "POST") chatCompletions(out, body) else sendJson(out, 405, errorJson("method_not_allowed", "POST attendu."))
+                if (method == "POST") chatCompletions(out, body, requestHeaders) else sendJson(out, 405, errorJson("method_not_allowed", "POST attendu."))
             path == "/v1/responses" || path == "/responses" ->
-                if (method == "POST") responses(out, body) else sendJson(out, 405, errorJson("method_not_allowed", "POST attendu."))
+                if (method == "POST") responses(out, body, requestHeaders) else sendJson(out, 405, errorJson("method_not_allowed", "POST attendu."))
             else -> sendJson(out, 404, errorJson("not_found", "Route inconnue : $path"))
         }
         try {
@@ -376,8 +378,8 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
     // ---------- OpenAI ----------
 
     private companion object {
-        const val MAX_IMAGES = 8
-        const val MAX_IMAGE_BYTES = 6 * 1024 * 1024
+        const val MAX_ATTACHMENTS = 8
+        const val MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
     }
 
     private fun parseMessages(body: String): Pair<List<Msg>, JSONObject> {
@@ -388,18 +390,52 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
             val m = arr.optJSONObject(i) ?: continue
             val role = m.optString("role", "user")
             val content = m.opt("content")
-            val imgs = ArrayList<ImagePart>()
+            val attachments = ArrayList<ImagePart>()
             val text = when (content) {
                 is String -> content
                 is JSONArray -> {
                     val sb = StringBuilder()
                     for (k in 0 until content.length()) {
-                        val p = content.optJSONObject(k) ?: continue
-                        when (p.optString("type")) {
-                            "text" -> sb.append(p.optString("text"))
-                            "image_url" -> {
-                                val u = p.optJSONObject("image_url")?.optString("url", "") ?: ""
-                                if (imgs.size < MAX_IMAGES) decodeImage(u)?.let { imgs.add(it) }
+                        val part = content.optJSONObject(k) ?: continue
+                        when (part.optString("type")) {
+                            "text", "input_text" -> sb.append(part.optString("text"))
+                            "image_url", "input_image" -> {
+                                val image = part.optJSONObject("image_url")
+                                val url = image?.optString("url", "")?.takeIf { it.isNotEmpty() }
+                                    ?: part.optString("image_url", part.optString("url", ""))
+                                if (url.isNotEmpty()) {
+                                    val decoded = decodeAttachment(url, "", "image/png")
+                                    if (decoded.size > MAX_ATTACHMENTS - attachments.size) {
+                                        throw IllegalArgumentException("Trop de pièces jointes (maximum $MAX_ATTACHMENTS pages/images).")
+                                    }
+                                    attachments.addAll(decoded)
+                                }
+                            }
+                            // OpenAI-native Chat Completions PDF/file part:
+                            // {"type":"file","file":{"filename":"x.pdf","file_data":"data:application/pdf;base64,..."}}
+                            // Also accept input_file (Responses API shape) for clients that reuse parts.
+                            "file", "input_file" -> {
+                                val f = part.optJSONObject("file") ?: part
+                                val url = f.optString("file_data", f.optString("file_url", f.optString("url", "")))
+                                val filename = f.optString("filename", part.optString("filename", "document.pdf"))
+                                if (url.isEmpty() && f.has("file_id")) {
+                                    throw IllegalArgumentException("file_id nécessite l'endpoint OpenAI Files, non fourni par ce proxy; envoie file_data ou file_url.")
+                                }
+                                if (url.isEmpty()) throw IllegalArgumentException("Partie file sans file_data ni file_url.")
+                                if (attachments.size >= MAX_ATTACHMENTS) throw IllegalArgumentException("Trop de pièces jointes (maximum $MAX_ATTACHMENTS).")
+                                val mimeHint = f.optString("mime_type", f.optString("mime", "application/pdf"))
+                                val items = decodeAttachment(url, filename, mimeHint)
+                                if (items.isEmpty()) throw IllegalArgumentException("Pièce jointe non décodable : $filename")
+                                if (items.size > MAX_ATTACHMENTS - attachments.size) {
+                                    throw IllegalArgumentException("Le PDF dépasse la limite de $MAX_ATTACHMENTS pages/images jointes.")
+                                }
+                                attachments.addAll(items)
+                                if (sb.isNotEmpty()) sb.append("\n")
+                                sb.append("[Fichier joint : ").append(filename)
+                                if (mimeHint.contains("pdf", true) || filename.endsWith(".pdf", true)) {
+                                    sb.append(" (PDF transmis comme fichier)")
+                                }
+                                sb.append("]")
                             }
                         }
                     }
@@ -407,41 +443,71 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
                 }
                 else -> ""
             }
-            msgs.add(Msg(role, text, imgs))
+            if (attachments.size > MAX_ATTACHMENTS) throw IllegalArgumentException("Trop de pièces jointes (maximum $MAX_ATTACHMENTS).")
+            msgs.add(Msg(role, text, attachments))
         }
         return msgs to root
     }
 
-    /** Décode `data:` (base64) ou télécharge une URL http(s) en image bornée. */
-    private fun decodeImage(url: String): ImagePart? {
-        if (url.isEmpty()) return null
+    /** Décode les formes OpenAI file_data/file_url et prépare les PDF en pages image pour le provider web. */
+    private fun decodeAttachment(url: String, filename: String, mimeHint: String): List<ImagePart> {
+        if (url.isEmpty()) return emptyList()
         if (url.startsWith("data:")) {
             val comma = url.indexOf(',')
-            if (comma < 0) return null
+            if (comma < 0) return emptyList()
             val head = url.substring(5, comma)
-            if (!head.contains("base64")) return null
-            val mime = head.substringBefore(';').ifBlank { "image/png" }
-            val bytes = try {
-                android.util.Base64.decode(url.substring(comma + 1), android.util.Base64.DEFAULT)
-            } catch (t: Throwable) {
-                return null
-            }
-            if (bytes.isEmpty() || bytes.size > MAX_IMAGE_BYTES) return null
-            return ImagePart(mime, nameFor(mime), bytes)
+            if (!head.contains("base64", ignoreCase = true)) throw IllegalArgumentException("Pièce jointe data: doit être base64.")
+            val mime = head.substringBefore(';').ifBlank { mimeHint.ifBlank { "application/octet-stream" } }
+            val bytes = try { android.util.Base64.decode(url.substring(comma + 1), android.util.Base64.DEFAULT) }
+                catch (_: Throwable) { throw IllegalArgumentException("Base64 invalide dans la pièce jointe.") }
+            if (bytes.isEmpty()) throw IllegalArgumentException("La pièce jointe est vide.")
+            if (bytes.size > MAX_ATTACHMENT_BYTES) throw IllegalArgumentException("Fichier trop volumineux (limite ${MAX_ATTACHMENT_BYTES / 1024 / 1024} Mo).")
+            return prepareAttachment(bytes, mime, safeFilename(filename, mime))
         }
-        if (!url.startsWith("http://") && !url.startsWith("https://")) return null
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return emptyList()
         return try {
             val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
             c.connectTimeout = 8_000
-            c.readTimeout = 20_000
+            c.readTimeout = 30_000
             c.setRequestProperty("User-Agent", "NemApi/1.0")
-            val bytes = c.inputStream.use { readLimited(it, MAX_IMAGE_BYTES) }
-            val mime = c.contentType?.substringBefore(';') ?: "image/png"
-            if (bytes.isEmpty()) null else ImagePart(mime, nameFor(mime), bytes)
+            val bytes = c.inputStream.use { readLimited(it, MAX_ATTACHMENT_BYTES) }
+            val mime = c.contentType?.substringBefore(';')?.takeIf { it.isNotBlank() } ?: mimeHint
+            if (bytes.isEmpty()) emptyList() else prepareAttachment(bytes, mime, safeFilename(filename, mime))
+        } catch (t: IllegalArgumentException) {
+            throw t
         } catch (t: Throwable) {
-            NemLog.w("api", "image distante non récupérée : ${t.message}")
-            null
+            NemLog.w("api", "pièce jointe distante non récupérée (${t.javaClass.simpleName})")
+            throw IllegalArgumentException("Impossible de télécharger la pièce jointe distante.")
         }
+    }
+
+    /** Preserve a native file as one multimodal attachment; DeepSeek Web processes the PDF server-side. */
+    private fun prepareAttachment(bytes: ByteArray, mime: String, name: String): List<ImagePart> {
+        val hasPdfHeader = bytes.size >= 5 && String(bytes, 0, 5, Charsets.US_ASCII) == "%PDF-"
+        val declaredPdf = mime.contains("pdf", true) || name.endsWith(".pdf", true)
+        if (declaredPdf && !hasPdfHeader) {
+            throw IllegalArgumentException("Le fichier déclaré PDF est invalide : $name")
+        }
+        val actualMime = if (hasPdfHeader) "application/pdf" else mime
+        val actualName = if (hasPdfHeader && !name.endsWith(".pdf", true)) {
+            name.substringBeforeLast('.', name) + ".pdf"
+        } else name
+        // Do not rasterize, split, or rewrite PDF bytes: upload exactly one File to DeepSeek's file input.
+        return listOf(ImagePart(actualMime, actualName, bytes))
+    }
+
+    private fun safeFilename(name: String, mime: String): String {
+        val cleaned = name.substringAfterLast('/').substringAfterLast('\\').replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
+        if (cleaned.isNotBlank() && cleaned.contains('.')) return cleaned
+        val ext = when {
+            mime.contains("pdf", true) -> "pdf"
+            mime.contains("jpeg", true) || mime.contains("jpg", true) -> "jpg"
+            mime.contains("webp", true) -> "webp"
+            mime.contains("gif", true) -> "gif"
+            mime.contains("png", true) -> "png"
+            else -> "bin"
+        }
+        return (cleaned.ifBlank { "attachment" }) + "." + ext
     }
 
     private fun readLimited(input: java.io.InputStream, max: Int): ByteArray {
@@ -450,17 +516,26 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         while (true) {
             val n = input.read(chunk)
             if (n < 0) break
+            if (buf.size() + n > max) throw IllegalArgumentException("Fichier trop volumineux (limite ${max / 1024 / 1024} Mo).")
             buf.write(chunk, 0, n)
-            if (buf.size() > max) break
         }
         return buf.toByteArray()
     }
 
-    private fun nameFor(mime: String): String = when {
-        mime.contains("jpeg") || mime.contains("jpg") -> "image.jpg"
-        mime.contains("webp") -> "image.webp"
-        mime.contains("gif") -> "image.gif"
-        else -> "image.png"
+    private fun isQwenRequest(headers: Map<String, String>, messages: JSONArray): Boolean {
+        val explicit = headers["x-nemapi-agent"]?.trim()?.lowercase()
+        if (explicit == "qwen-code") return true
+        if ((headers["user-agent"] ?: "").startsWith("QwenCode/", ignoreCase = true)) return true
+        for (i in 0 until messages.length()) {
+            val m = messages.optJSONObject(i) ?: continue
+            val content = m.opt("content")
+            if (content is String && content.contains("You are Qwen Code", ignoreCase = true)) return true
+            if (content is JSONArray) for (j in 0 until content.length()) {
+                val p = content.optJSONObject(j) ?: continue
+                if (p.optString("text").contains("You are Qwen Code", ignoreCase = true)) return true
+            }
+        }
+        return false
     }
 
     /** Estimation grossière (≈4 caractères par token) faute de compteur exact. */
@@ -473,7 +548,7 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
             .put("total_tokens", pt + ct)
     }
 
-    private fun chatCompletions(out: OutputStream, body: String) {
+    private fun chatCompletions(out: OutputStream, body: String, headers: Map<String, String> = emptyMap()) {
         AppState.requests.incrementAndGet()
         AppState.lastRequestAt.set(System.currentTimeMillis())
         val started = System.currentTimeMillis()
@@ -485,6 +560,14 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         }
         val stream = root.optBoolean("stream", false)
         val model = root.optString("model", "deepseek-chat")
+        val rawMessages = root.optJSONArray("messages") ?: JSONArray()
+        val qwen = isQwenRequest(headers, rawMessages)
+        com.nemap.android.core.WebStore.init(context)
+        if (qwen) com.nemap.android.core.WebStore.noteAgentRequest(context, "qwen-code")
+        val qwenIncremental = qwen &&
+            com.nemap.android.core.WebStore.agentEnabled(context, "qwen-code") &&
+            com.nemap.android.core.WebStore.agentFeatureEnabled(context, "qwen-code", "incremental_context")
+        val rawTools = root.optJSONArray("tools") ?: root.optJSONArray("functions")
         val id = "chatcmpl-${seq.incrementAndGet()}"
         val created = System.currentTimeMillis() / 1000
 
@@ -496,7 +579,15 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         if (!stream) {
             try {
                 val text = runBlocking {
-                    DeepSeek.chat(msgs, onDelta = { }) { cancelled.get() }
+                    DeepSeek.chat(
+                        messages = msgs,
+                        onDelta = { },
+                        shouldCancel = { cancelled.get() },
+                        context = context,
+                        rawMessages = rawMessages,
+                        tools = rawTools,
+                        qwenIncremental = qwenIncremental
+                    )
                 }
                 val resp = JSONObject()
                     .put("id", id)
@@ -572,14 +663,18 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         try {
             runBlocking {
                 DeepSeek.chat(
-                    msgs,
+                    messages = msgs,
                     onDelta = { d ->
                         if (firstDeltaAt == 0L) firstDeltaAt = System.currentTimeMillis()
                         chunks++
                         chars += d.length
                         writeSse(chunk(JSONObject().put("content", d), null))
                     },
-                    shouldCancel = { cancelled.get() }
+                    shouldCancel = { cancelled.get() },
+                    context = context,
+                    rawMessages = rawMessages,
+                    tools = rawTools,
+                    qwenIncremental = qwenIncremental
                 )
             }
             writeSse(chunk(JSONObject(), "stop"))
@@ -608,27 +703,51 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         else -> 400
     }
 
-    /** Endpoint /v1/responses : mapping minimal sur le chat. */
-    private fun responses(out: OutputStream, body: String) {
+    /** Endpoint /v1/responses : convertit aussi les input_file/input_image natifs. */
+    private fun responses(out: OutputStream, body: String, headers: Map<String, String> = emptyMap()) {
         try {
             val root = JSONObject(body)
-            val input = root.optString("input", root.optString("prompt", ""))
-            val messages = JSONArray().put(JSONObject().put("role", "user").put("content", input))
+            val messages = JSONArray()
+            val instructions = root.optString("instructions", "")
+            if (instructions.isNotBlank()) messages.put(JSONObject().put("role", "system").put("content", instructions))
+            val input = root.opt("input") ?: root.opt("prompt")
+            when (input) {
+                is String -> messages.put(JSONObject().put("role", "user").put("content", input))
+                is JSONArray -> {
+                    for (i in 0 until input.length()) {
+                        val item = input.optJSONObject(i)
+                        if (item == null) {
+                            val v = input.opt(i)
+                            if (v is String) messages.put(JSONObject().put("role", "user").put("content", v))
+                            continue
+                        }
+                        val itemType = item.optString("type")
+                        if (itemType == "message" || item.has("role")) {
+                            val role = item.optString("role", "user")
+                            val rawContent = item.opt("content")
+                            val content = if (rawContent is JSONArray) normalizeResponseParts(rawContent) else rawContent ?: ""
+                            messages.put(JSONObject().put("role", role).put("content", content))
+                        } else {
+                            messages.put(JSONObject().put("role", "user").put("content", normalizeResponseParts(JSONArray().put(item))))
+                        }
+                    }
+                }
+                is JSONObject -> messages.put(JSONObject().put("role", input.optString("role", "user"))
+                    .put("content", normalizeResponseParts(input.optJSONArray("content") ?: JSONArray().put(input))))
+                else -> throw IllegalArgumentException("'input' (ou 'instructions') est requis.")
+            }
+            if (messages.length() == 0) throw IllegalArgumentException("'input' (ou 'instructions') est requis.")
             val synthetic = JSONObject()
                 .put("model", root.optString("model", "deepseek-chat"))
                 .put("messages", messages)
                 .put("stream", false)
+            root.optJSONArray("tools")?.let { synthetic.put("tools", normalizeResponseTools(it)) }
             val sw = java.io.ByteArrayOutputStream()
-            val cap = object : OutputStream() {
-                override fun write(b: Int) {
-                    sw.write(b)
-                }
-            }
-            chatCompletions(cap, synthetic.toString())
+            val cap = object : OutputStream() { override fun write(b: Int) { sw.write(b) } }
+            chatCompletions(cap, synthetic.toString(), headers)
             val resp = String(sw.toByteArray(), Charsets.UTF_8)
             val json = JSONObject(resp.substringAfter("\r\n\r\n"))
-            val text = json.optJSONArray("choices")?.optJSONObject(0)
-                ?.optJSONObject("message")?.optString("content", "") ?: ""
+            val text = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content", "") ?: ""
             val outJson = JSONObject()
                 .put("id", "resp_${seq.incrementAndGet()}")
                 .put("object", "response")
@@ -641,6 +760,42 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         } catch (t: Throwable) {
             sendJson(out, 400, errorJson("invalid_request", t.message ?: "requête invalide"))
         }
+    }
+
+    private fun normalizeResponseParts(parts: JSONArray): JSONArray {
+        val out = JSONArray()
+        for (i in 0 until parts.length()) {
+            val p = parts.optJSONObject(i) ?: continue
+            when (p.optString("type")) {
+                "input_text", "text" -> out.put(JSONObject().put("type", "text").put("text", p.optString("text")))
+                "input_image" -> {
+                    val raw = p.opt("image_url")
+                    val url = if (raw is JSONObject) raw.optString("url", "") else p.optString("image_url", p.optString("url", ""))
+                    out.put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", url)))
+                }
+                "input_file", "file" -> {
+                    val file = p.optJSONObject("file") ?: p
+                    out.put(JSONObject().put("type", "file").put("file", JSONObject()
+                        .put("filename", file.optString("filename", p.optString("filename", "document.pdf")))
+                        .put("file_data", file.optString("file_data", file.optString("file_url", file.optString("url", ""))))
+                        .put("mime_type", file.optString("mime_type", "application/pdf"))))
+                }
+            }
+        }
+        return out
+    }
+
+    private fun normalizeResponseTools(tools: JSONArray): JSONArray {
+        val out = JSONArray()
+        for (i in 0 until tools.length()) {
+            val t = tools.optJSONObject(i) ?: continue
+            if (t.optString("type") == "function" && !t.has("function")) {
+                out.put(JSONObject().put("type", "function").put("function", JSONObject()
+                    .put("name", t.optString("name")).put("description", t.optString("description"))
+                    .put("parameters", t.opt("parameters") ?: JSONObject())))
+            } else out.put(t)
+        }
+        return out
     }
 
     // ---------- dashboard ----------

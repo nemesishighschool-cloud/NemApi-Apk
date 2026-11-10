@@ -119,15 +119,13 @@ object WebUi {
                 else json(agent)
             }
 
-            path == "/sessions" || path == "/sessions/reset" -> json(
-                JSONObject()
-                    .put("enabled", false)
-                    .put("sessions", JSONObject())
-                    .put("requests", JSONObject().put("full", 0).put("delta", 0).put("cached", 0).put("local", 0).put("side", 0))
-                    .put("chars_saved", 0)
-                    .put("ok", true)
-                    .put("reset", 0)
-            )
+            path == "/sessions/reset" && method == "POST" -> {
+                val reset = com.nemap.android.core.QwenContext.reset(ctx)
+                val summary = com.nemap.android.core.QwenContext.summary(ctx)
+                summary.put("ok", true).put("reset", reset)
+                json(summary)
+            }
+            path == "/sessions" -> json(com.nemap.android.core.QwenContext.summary(ctx))
 
             path == "/stop" && method == "POST" -> json(JSONObject().put("ok", true).put("cancelled", 0))
 
