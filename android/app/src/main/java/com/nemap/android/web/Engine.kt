@@ -113,6 +113,18 @@ object Engine {
     suspend fun streamState(): JSONObject =
         evalJson("window.__nap ? window.__nap.state() : JSON.stringify({started:false})")
 
+    /**
+     * Suivi des téléversements de pièces jointes, vus depuis le réseau
+     * (requêtes interceptées par `hook.js`). Beaucoup plus fiable que de
+     * deviner l'état du DOM : on sait quand la page envoie le fichier et
+     * quand elle a fini.
+     */
+    suspend fun uploadState(): JSONObject = try {
+        evalJson("window.__napUpload ? window.__napUpload() : JSON.stringify({seen:false,active:false})")
+    } catch (t: Throwable) {
+        JSONObject().put("seen", false).put("active", false)
+    }
+
     suspend fun resetStream() {
         evalJs("window.__nap && window.__nap.reset()")
     }

@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicLong
 object AppState {
 
     const val API_PORT = 8090
-    const val VERSION = "1.0.1"
+    const val VERSION = "1.0.2"
 
     @Volatile var serviceRunning = false
     @Volatile var startedAt: Long = 0L
@@ -83,23 +83,83 @@ object AppState {
         lastError = code
     }
 
-    fun ipAddresses(): List<String> {
-        val out = mutableListOf<String>()
+    /**
+     * Adresses IPv4 joignables depuis le réseau local, **la bonne en premier**.
+     *
+     * Le bug corrigé ici : l'ancienne version renvoyait les adresses dans
+     * l'ordre des interfaces, donc sur un téléphone avec données mobiles la
+     * première pouvait être une adresse cellulaire (rmnet/ccmni) — affichée
+     * dans l'app comme « URL du réseau local », elle ne répond jamais. On
+     * classe désormais Wi-Fi (wlan0) d'abord, puis Ethernet/USB, et on écarte
+     * explicitement cellulaire, VPN et interfaces virtuelles.
+     */
+    fun lanAddresses(): List<String> {
+        val scored = mutableListOf<Pair<Int, String>>()
         try {
             val ifaces = NetworkInterface.getNetworkInterfaces()
             while (ifaces.hasMoreElements()) {
                 val iface = ifaces.nextElement()
                 if (!iface.isUp || iface.isLoopback) continue
+                val name = (iface.name ?: "").lowercase()
+                if (CELLULAR_RE.containsMatchIn(name) || VPN_RE.containsMatchIn(name)) continue
+                val score = when {
+                    name.startsWith("wlan") -> 0
+                    name.startsWith("eth") -> 1
+                    name.startsWith("ap") || name.startsWith("swlan") -> 2 // partage de connexion
+                    else -> 3
+                }
                 for (addr in iface.inetAddresses) {
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                        out.add(addr.hostAddress ?: continue)
+                        val ip = addr.hostAddress ?: continue
+                        if (ip.startsWith("169.254.")) continue // lien local : jamais joignable
+                        scored.add(score to ip)
                     }
                 }
             }
         } catch (_: Throwable) {
         }
-        return out.distinct()
+        return scored.sortedBy { it.first }.map { it.second }.distinct()
     }
+
+    /** Toutes les interfaces, avec leur rôle : pour l'écran de diagnostic réseau. */
+    fun interfacesJson(): String {
+        val arr = StringBuilder("[")
+        var first = true
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces()
+            while (ifaces.hasMoreElements()) {
+                val iface = ifaces.nextElement()
+                val name = iface.name ?: ""
+                val ips = iface.inetAddresses.toList().filterIsInstance<Inet4Address>()
+                    .mapNotNull { it.hostAddress }
+                if (ips.isEmpty()) continue
+                val role = when {
+                    iface.isLoopback -> "loopback"
+                    CELLULAR_RE.containsMatchIn(name.lowercase()) -> "cellulaire"
+                    VPN_RE.containsMatchIn(name.lowercase()) -> "vpn"
+                    name.startsWith("wlan") -> "wifi"
+                    name.startsWith("eth") -> "ethernet"
+                    else -> "autre"
+                }
+                if (!first) arr.append(',')
+                first = false
+                arr.append("{\"name\":").append(org.json.JSONObject.quote(name))
+                    .append(",\"role\":").append(org.json.JSONObject.quote(role))
+                    .append(",\"up\":").append(iface.isUp)
+                    .append(",\"addresses\":[")
+                    .append(ips.joinToString(",") { org.json.JSONObject.quote(it) })
+                    .append("]}")
+            }
+        } catch (_: Throwable) {
+        }
+        return arr.append(']').toString()
+    }
+
+    private val CELLULAR_RE = Regex("^(rmnet|ccmni|pdp|clat|v4-rmnet|seth)")
+    private val VPN_RE = Regex("^(tun|ppp|ipsec|wg|utun)")
+
+    /** Compatibilité : l'ancienne API attend une liste d'adresses, la meilleure d'abord. */
+    fun ipAddresses(): List<String> = lanAddresses()
 
     private fun iso(ts: Long): String =
         if (ts <= 0) "" else SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date(ts))

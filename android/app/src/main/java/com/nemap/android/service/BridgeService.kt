@@ -17,6 +17,7 @@ import com.nemap.android.api.ApiServer
 import com.nemap.android.core.AppState
 import com.nemap.android.core.Cookies
 import com.nemap.android.core.NemLog
+import com.nemap.android.core.WebStore
 
 /**
  * ForegroundService : garde le processus (donc le WebView et l'API) vivant
@@ -33,6 +34,7 @@ class BridgeService : Service() {
 
     private var api: ApiServer? = null
     private var keeper: kotlinx.coroutines.Job? = null
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -61,12 +63,44 @@ class BridgeService : Service() {
         if (api == null) {
             api = ApiServer(applicationContext)
         }
+        WebStore.init(applicationContext)
         if (api?.running != true) api?.start()
+        acquireWifiLock()
         AppState.serviceRunning = true
         if (AppState.startedAt == 0L) AppState.startedAt = System.currentTimeMillis()
         startCookieKeeper()
         NemLog.i("service", "service démarré")
         notifyState("NemApi actif — ${AppState.activeProvider} — port ${AppState.API_PORT}")
+    }
+
+    /**
+     * Empêche la radio Wi-Fi de s'endormir : sans cela, une requête arrivant
+     * du réseau local après quelques minutes d'inactivité pouvait rester sans
+     * réponse (le téléphone était joignable, mais la connexion tombait).
+     * Sans effet si l'appareil n'est pas en Wi-Fi — on ignore l'échec.
+     */
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        try {
+            val wm = applicationContext.getSystemService(android.content.Context.WIFI_SERVICE)
+                as? android.net.wifi.WifiManager ?: return
+            wifiLock = wm.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "nemapi:api")
+                .also {
+                    it.setReferenceCounted(false)
+                    it.acquire()
+                }
+            NemLog.i("service", "verrou Wi-Fi posé (API joignable en continu depuis le réseau local)")
+        } catch (t: Throwable) {
+            NemLog.w("service", "verrou Wi-Fi indisponible : ${t.javaClass.simpleName}")
+        }
+    }
+
+    private fun releaseWifiLock() {
+        try {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Throwable) {
+        }
+        wifiLock = null
     }
 
     /**
@@ -87,6 +121,7 @@ class BridgeService : Service() {
     }
 
     private fun stopEverything() {
+        releaseWifiLock()
         keeper?.cancel()
         keeper = null
         api?.stop()

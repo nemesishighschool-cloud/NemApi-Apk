@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicLong
 class ApiServer(private val context: Context, private val port: Int = AppState.API_PORT) {
 
     private var serverSocket: ServerSocket? = null
+    private var ipv6: ServerSocket? = null
     private val pool = Executors.newCachedThreadPool()
     private val seq = AtomicLong(0)
 
@@ -50,11 +51,38 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
             serverSocket = ss
             running = true
             Thread({ acceptLoop() }, "nemapi-api").apply { isDaemon = true }.start()
-            NemLog.i("api", "API en écoute sur 0.0.0.0:$port")
+            NemLog.i("api", "API en écoute sur 0.0.0.0:$port (IPv4 + réseau local)")
+            startIpv6Listener()
             true
         } catch (t: Throwable) {
             NemLog.e("api", "démarrage impossible : ${t.message}")
             false
+        }
+    }
+
+    /**
+     * Second écouteur sur `::` : certains réseaux Wi-Fi n'attribuent qu'une
+     * adresse IPv6. Best-effort — si le noyau refuse, l'IPv4 reste seul.
+     */
+    private fun startIpv6Listener() {
+        try {
+            val ss = ServerSocket()
+            ss.reuseAddress = true
+            ss.bind(InetSocketAddress(java.net.InetAddress.getByName("::"), port))
+            ipv6 = ss
+            Thread({
+                while (running) {
+                    try {
+                        val s = ss.accept() ?: break
+                        pool.execute { try { handle(s) } catch (_: Throwable) { } finally { try { s.close() } catch (_: Throwable) { } } }
+                    } catch (_: Throwable) {
+                        if (running) Thread.sleep(200)
+                    }
+                }
+            }, "nemapi-api6").apply { isDaemon = true }.start()
+            NemLog.i("api", "API en écoute aussi sur [::]:$port")
+        } catch (t: Throwable) {
+            NemLog.i("api", "pas d'écoute IPv6 (${t.javaClass.simpleName}) — IPv4 seul")
         }
     }
 
@@ -64,7 +92,12 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
             serverSocket?.close()
         } catch (_: Throwable) {
         }
+        try {
+            ipv6?.close()
+        } catch (_: Throwable) {
+        }
         serverSocket = null
+        ipv6 = null
         NemLog.i("api", "API arrêtée")
     }
 
@@ -130,6 +163,7 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         val query = if (fullPath.contains('?')) fullPath.substringAfter('?') else ""
 
         var contentLength = 0
+        var authorization = ""
         while (true) {
             val line = readLine(input) ?: break
             if (line.isEmpty()) break
@@ -138,13 +172,37 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
                 val name = line.substring(0, idx).trim().lowercase()
                 val value = line.substring(idx + 1).trim()
                 if (name == "content-length") contentLength = value.toIntOrNull() ?: 0
+                if (name == "authorization") authorization = value
             }
         }
         val body = if (contentLength > 0) String(readN(input, contentLength), Charsets.UTF_8) else ""
 
+        // Le dashboard est celui de NemApi web (assets/web), servi tel quel.
+        val web = WebUi.handle(context, method, path, body)
+        if (web != null) {
+            sendBytes(out, web.code, web.type, web.body)
+            out.flush()
+            return
+        }
+
         when {
-            // la racine sert directement le tableau de bord (pas de redirection)
-            path == "/" || path == "/index.html" || path == "/dashboard" -> sendHtml(out, dashboardHtml())
+            path == "/api/net" -> {
+                // Diagnostic « pourquoi je ne vois pas l'API depuis mon PC ? »
+                // Toutes les interfaces, leur rôle, et l'URL à essayer en premier.
+                val ips = AppState.lanAddresses()
+                val best = ips.firstOrNull()
+                val payload = JSONObject()
+                    .put("port", AppState.API_PORT)
+                    .put("listening_on", "0.0.0.0")
+                    .put("lan_urls", JSONArray(ips))
+                    .put("try_first", if (best != null) "http://$best:${AppState.API_PORT}" else "")
+                    .put("api_base", if (best != null) "http://$best:${AppState.API_PORT}/v1" else "")
+                    .put("interfaces", JSONArray(AppState.interfacesJson()))
+                    .put("hint", "Ouvre l'URL « try_first » depuis un appareil du même Wi-Fi. " +
+                        "Si elle ne répond pas : le Wi-Fi est peut-être un réseau invité (isolation des clients), " +
+                        "ou l'ordinateur est sur un autre sous-réseau.")
+                sendJson(out, 200, payload.toString())
+            }
             path == "/api/status" -> sendJson(out, 200, AppState.statusJson())
             path == "/api/logs" -> sendJson(out, 200, "{\"entries\":${NemLog.asJson()}}")
             path == "/api/providers" -> sendJson(out, 200, providersJson())
@@ -211,6 +269,8 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
                 context.startService(Intent(context, BridgeService::class.java).setAction(BridgeService.ACTION_STOP))
                 sendJson(out, 200, "{\"ok\":true}")
             }
+            (path.startsWith("/v1/") || path == "/models") && !authorized(authorization) ->
+                sendJson(out, 401, errorJson("invalid_api_key", "Clé API manquante ou invalide."))
             path == "/v1/models" || path == "/models" -> sendJson(out, 200, modelsJson())
             path == "/v1/chat/completions" || path == "/chat/completions" ->
                 if (method == "POST") chatCompletions(out, body) else sendJson(out, 405, errorJson("method_not_allowed", "POST attendu."))
@@ -249,6 +309,29 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         out.write(head.toByteArray())
         out.write(bytes)
         out.flush()
+    }
+
+    private fun sendBytes(out: OutputStream, code: Int, type: String, bytes: ByteArray) {
+        val status = when (code) {
+            200 -> "200 OK"
+            404 -> "404 Not Found"
+            401 -> "401 Unauthorized"
+            else -> "$code OK"
+        }
+        val head = "HTTP/1.1 $status\r\nContent-Type: $type\r\nContent-Length: ${bytes.size}\r\n" +
+            "Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n" +
+            "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET,POST,DELETE,OPTIONS\r\n" +
+            "Connection: close\r\n\r\n"
+        out.write(head.toByteArray())
+        out.write(bytes)
+        out.flush()
+    }
+
+    /** Bearer facultatif : refusé seulement si l'utilisateur a activé la protection. */
+    private fun authorized(header: String): Boolean {
+        if (!com.nemap.android.core.WebStore.requireAuth()) return true
+        val token = header.removePrefix("Bearer ").removePrefix("bearer ").trim()
+        return com.nemap.android.core.WebStore.keyValid(token)
     }
 
     private fun sendHtml(out: OutputStream, html: String) {
@@ -438,6 +521,7 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
                 AppState.noteLatency(stream = false, ttftMs = totalMs, totalMs = totalMs,
                     chars = text.length, chunks = 1, images = imageCount, ok = true)
                 NemLog.i("api", "requête non-stream terminée en $totalMs ms (${text.length} c.)")
+                com.nemap.android.core.WebStore.noteRequest("deepseek", promptChars.toLong(), text.length.toLong(), ok = true)
             } catch (e: NemApiException) {
                 AppState.noteError(e.code)
                 sendJson(out, httpFor(e.code), errorJson(e.code, e.message))
@@ -505,6 +589,7 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
             AppState.noteLatency(stream = true, ttftMs = ttft, totalMs = totalMs,
                 chars = chars, chunks = chunks, images = imageCount, ok = true)
             NemLog.i("api", "stream terminé en $totalMs ms (premier fragment à $ttft ms, $chunks morceaux)")
+            com.nemap.android.core.WebStore.noteRequest("deepseek", promptChars.toLong(), chars.toLong(), ok = true)
         } catch (e: NemApiException) {
             AppState.noteError(e.code)
             writeSse(errorJson(e.code, e.message))
@@ -560,68 +645,4 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
 
     // ---------- dashboard ----------
 
-    private fun dashboardHtml(): String {
-        val base = AppState.ipAddresses().firstOrNull() ?: "127.0.0.1"
-        return """
-<!doctype html><html lang="fr"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NemApi Android — tableau de bord</title>
-<style>
-:root{color-scheme:dark}
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#0e1116;color:#e6edf3}
-header{padding:14px 18px;background:#161b22;border-bottom:1px solid #30363d;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-h1{font-size:16px;margin:0;font-weight:600}
-.badge{font-size:12px;padding:2px 8px;border-radius:10px;background:#1f6feb33;border:1px solid #1f6feb;color:#79c0ff}
-.badge.off{background:#f8514933;border-color:#f85149;color:#ff7ب66}
-main{padding:16px;display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
-section{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px}
-h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin:0 0 10px}
-pre{margin:0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.45;color:#c9d1d9;max-height:340px;overflow:auto}
-button{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer}
-button:hover{border-color:#8b949e}
-.warn{background:#bb800026;border:1px solid #bb8000;color:#e3b341;padding:10px 12px;border-radius:8px;font-size:13px}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
-.kv div:nth-child(odd){color:#8b949e}
-code{background:#21262d;padding:1px 5px;border-radius:4px}
-</style></head><body>
-<header><h1>NemApi Android</h1><span id="svc" class="badge off">service arrêté</span>
-<span class="badge" id="prov">provider —</span><span class="badge" id="mode">mode —</span></header>
-<main>
-<section><h2>Serveur</h2>
-<div class="kv" id="info"></div>
-<p><button onclick="post('/api/service/start')">Démarrer</button>
-<button onclick="post('/api/service/stop')">Arrêter</button>
-<button onclick="load()">Rafraîchir</button></p>
-<p style="font-size:13px;color:#8b949e">Client OpenAI → <code>http://$base:${AppState.API_PORT}/v1</code></p></section>
-<section><h2>État (JSON)</h2><pre id="status">…</pre></section>
-<section><h2>Journal technique</h2><pre id="logs">…</pre></section>
-<section><h2>Sécurité</h2><div class="warn">Réseau local ouvert : l'API et ce tableau de bord sont accessibles à tout appareil du réseau. La protection Bearer est optionnelle et désactivée par défaut.</div></section>
-</main>
-<script>
-async function post(u){await fetch(u,{method:'POST'});load()}
-async function load(){
- try{
-  const s=await (await fetch('/api/status')).json();
-  document.getElementById('status').textContent=JSON.stringify(s,null,2);
-  const b=document.getElementById('svc');
-  b.textContent=s.service.running?'service actif':'service arrêté';
-  b.className='badge'+(s.service.running?'':' off');
-  document.getElementById('prov').textContent='provider '+s.provider.active_label;
-  document.getElementById('mode').textContent='mode '+s.service.observation_mode;
-  const st=s.stats, ip=(s.service.ip_addresses[0]||'—');
-  document.getElementById('info').innerHTML=
-    '<div>IP</div><div>'+ip+':'+s.service.api_port+'</div>'+
-    '<div>Version</div><div>'+s.service.version+'</div>'+
-    '<div>WebView</div><div>'+s.provider.webview_provider+'</div>'+
-    '<div>Requêtes</div><div>'+st.requests+'</div>'+
-    '<div>Erreurs</div><div>'+JSON.stringify(st.errors_by_code)+'</div>'+
-    '<div>Page</div><div>'+s.provider.page_url+'</div>';
-  const l=await (await fetch('/api/logs')).json();
-  document.getElementById('logs').textContent=l.entries.slice(-40).reverse().map(e=>e.at+' '+e.level+' ['+e.category+'] '+e.message).join('\n');
- }catch(e){document.getElementById('status').textContent='hors ligne : '+e}
-}
-load();setInterval(load,3000);
-</script></body></html>
-        """.trimIndent()
-    }
 }

@@ -737,7 +737,10 @@ class MainActivity : Activity() {
         vMode.text = AppState.observationMode
         vPage.text = AppState.pageUrl.ifEmpty { "—" }
         vBase.text = "http://$ip:${AppState.API_PORT}/v1"
-        vDash.text = "http://$ip:${AppState.API_PORT}"
+        // les autres interfaces (partage de connexion, Ethernet…) pour éviter
+        // de tester une adresse qui n'est pas sur le même réseau
+        vDash.text = "http://$ip:${AppState.API_PORT}" +
+            if (ips.size > 1) "\naussi : " + ips.drop(1).joinToString(" · ") { "http://$it:${AppState.API_PORT}" } else ""
 
         val t = AppState.lastTtftMs.get()
         val tot = AppState.lastTotalMs.get()

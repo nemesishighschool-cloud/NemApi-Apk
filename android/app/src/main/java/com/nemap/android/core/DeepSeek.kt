@@ -27,7 +27,10 @@ object DeepSeek {
     private const val RESPONSE_MS = 300_000L
     private const val STABILITY_MS = 2_000L
     private const val POLL_MS = 250L
+    /** Plafond de sécurité, plus jamais atteint en pratique (voir waitUpload). */
     private const val UPLOAD_MS = 45_000L
+    /** Au-delà, on considère que la page garde la pièce jointe en local. */
+    private const val UPLOAD_SILENCE_MS = 3_000L
     /** Taille d'un morceau de base64 transféré par evaluateJavascript. */
     private const val CHUNK = 96_000
 
@@ -177,25 +180,78 @@ object DeepSeek {
             Engine.adapter("attachBegin")
             return
         }
-        NemLog.i("dom", "image(s) déposée(s) : ${commit.optInt("in_input")} fichier(s) dans l'entrée")
+        // `in_input` retombe souvent à 0 : la page vide l'input dès qu'elle a lu
+        // le fichier. C'est `wanted` qui dit combien d'images sont parties.
+        val inInput = commit.optInt("in_input")
+        val wanted = commit.optInt("wanted", 0)
+        NemLog.i(
+            "dom",
+            if (inInput > 0) "image(s) déposée(s) : $inInput fichier(s) dans l'entrée"
+            else "image(s) déposée(s) : $wanted transmise(s) au composeur"
+        )
 
-        // attente du téléversement, côté Kotlin (les timers JS sont bridés en arrière-plan)
+        waitUpload(shouldCancel)
+    }
+
+    /**
+     * Attend la fin du téléversement des pièces jointes.
+     *
+     * Avant : on interrogeait le DOM (vignettes, `input.files`) ; quand les
+     * sélecteurs ne correspondaient pas, on attendait **toujours** le plafond
+     * de 45 s — d'où un premier token figé autour de 46 s pour chaque image.
+     *
+     * Maintenant : on écoute le réseau (requêtes de téléversement captées par
+     * `hook.js`). On sort dès que la requête est terminée, et au bout de
+     * [UPLOAD_SILENCE_MS] si la page ne fait aucune requête (pièce jointe
+     * traitée en local). Le DOM ne sert plus que de secours.
+     */
+    private suspend fun waitUpload(shouldCancel: () -> Boolean) {
+        try {
+            Engine.evalJs("window.__napUploadReset && window.__napUploadReset()")
+        } catch (_: Throwable) {
+        }
         val t0 = System.currentTimeMillis()
-        var last = ""
+        var lastNote = ""
         while (System.currentTimeMillis() - t0 < UPLOAD_MS) {
             if (isCancelled(shouldCancel)) throw NemApiException.cancelled()
-            val st = Engine.adapter("uploadState")
-            val shots = st.optInt("shots")
-            val files = st.optInt("files")
-            if (st.optBoolean("ready") || (!st.optBoolean("busy") && (shots > 0 || files > 0))) {
-                NemLog.i("dom", "téléversement terminé en ${System.currentTimeMillis() - t0} ms " +
-                    "(vignettes=$shots, fichiers=$files)")
+            val st = try {
+                Engine.uploadState()
+            } catch (_: Throwable) {
+                JSONObject().put("seen", false).put("active", 0)
+            }
+            val seen = st.optBoolean("seen")
+            val active = st.optInt("active")
+            val elapsed = System.currentTimeMillis() - t0
+
+            if (seen && active == 0) {
+                val ok = st.isNull("ok") || st.optBoolean("ok", true)
+                NemLog.i("dom", "téléversement terminé en ${elapsed} ms " +
+                    "(HTTP ${st.optInt("status")}, ${st.optInt("total")} requête(s))")
                 return
             }
-            last = "vignettes=$shots fichiers=$files occupé=${st.optBoolean("busy")}"
+
+            // aucun téléversement réseau : la page gère la pièce jointe en local
+            if (!seen && elapsed > UPLOAD_SILENCE_MS) {
+                NemLog.i("dom", "aucune requête de téléversement en ${elapsed} ms — pièce jointe traitée en local")
+                return
+            }
+
+            // secours DOM (vignette déjà affichée)
+            if (seen && active > 0 && elapsed > UPLOAD_SILENCE_MS) {
+                val dom = try {
+                    Engine.adapter("uploadState")
+                } catch (_: Throwable) {
+                    JSONObject()
+                }
+                if (dom.optBoolean("ready")) {
+                    NemLog.i("dom", "téléversement confirmé par le DOM en ${elapsed} ms")
+                    return
+                }
+                lastNote = "requête active depuis ${elapsed} ms"
+            }
             delay(POLL_MS)
         }
-        NemLog.w("dom", "téléversement non confirmé après $UPLOAD_MS ms ($last) — envoi quand même")
+        NemLog.w("dom", "téléversement non confirmé après $UPLOAD_MS ms ($lastNote) — envoi quand même")
     }
 
     private suspend fun waitSendReady(budgetMs: Long, shouldCancel: () -> Boolean): Boolean {

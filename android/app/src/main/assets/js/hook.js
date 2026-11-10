@@ -294,6 +294,56 @@
     }
   }
 
+  // ---- suivi des téléversements de pièces jointes -------------------------
+  // L'app attendait auparavant que le DOM veuille bien montrer une vignette :
+  // quand les sélecteurs ne correspondaient pas, elle attendait le plafond
+  // complet (45 s) à chaque image — d'où un temps de premier token toujours
+  // identique, quelle que soit l'image. On observe maintenant les requêtes
+  // elles-mêmes : démarrage, fin, code HTTP, durée.
+  var UPLOAD_PATH_RE = /upload|file|attach|asset/i;
+  var UPLOAD_NOT_RE = /pow_challenge|telemetry|event|history|sessions?\/list/i;
+
+  function isUploadCall(method, url) {
+    var p = pathOf(url);
+    if (!p || UPLOAD_NOT_RE.test(p)) return false;
+    return UPLOAD_PATH_RE.test(p) && String(method).toUpperCase() !== "GET";
+  }
+
+  var UP = { seen: false, active: 0, total: 0, ok: null, status: 0, ms: 0, startedAt: 0, endedAt: 0 };
+
+  function uploadBegin(url) {
+    UP.seen = true;
+    UP.active++;
+    UP.total++;
+    UP.startedAt = Date.now();
+    UP.url = pathOf(url);
+  }
+
+  function uploadEnd(status, failed) {
+    UP.active = Math.max(0, UP.active - 1);
+    UP.endedAt = Date.now();
+    UP.ms = UP.startedAt ? UP.endedAt - UP.startedAt : 0;
+    UP.status = status || 0;
+    UP.ok = !failed && (!status || status < 400);
+  }
+
+  window.__napUpload = function () {
+    return JSON.stringify({
+      seen: UP.seen,
+      active: UP.active,
+      total: UP.total,
+      ok: UP.ok,
+      status: UP.status,
+      ms: UP.ms,
+      done: UP.seen && UP.active === 0
+    });
+  };
+
+  window.__napUploadReset = function () {
+    UP = { seen: false, active: 0, total: 0, ok: null, status: 0, ms: 0, startedAt: 0, endedAt: 0 };
+    return "1";
+  };
+
   // ---- détection des requêtes à observer ----
   // On teste le CHEMIN seul : le nom d'hôte « chat.deepseek.com » contient
   // « chat » et faisait capturer la télémétrie au lieu du flux de réponse.
@@ -331,6 +381,12 @@
       var p = origFetch.apply(this, arguments);
       try {
         noteReq(method, url);
+        if (isUploadCall(method, url)) {
+          uploadBegin(url);
+          p.then(function (res) {
+            try { uploadEnd(res.status, !res.ok); } catch (e) { uploadEnd(0, false); }
+          })["catch"](function () { uploadEnd(0, true); });
+        }
         if (isChatCall(method, url)) {
           var rec = newRecord(url);
           p.then(function (res) {
@@ -370,6 +426,13 @@
     try {
       H.lastWrapper = H.inst;
       noteReq(xhr.__napMethod, xhr.__napUrl);
+      if (isUploadCall(xhr.__napMethod, xhr.__napUrl)) {
+        uploadBegin(xhr.__napUrl);
+        xhr.addEventListener("loadend", function () {
+          try { uploadEnd(xhr.status, xhr.status >= 400 || xhr.status === 0); }
+          catch (e) { uploadEnd(0, false); }
+        });
+      }
       if (isChatCall(xhr.__napMethod, xhr.__napUrl)) {
         var rec = newRecord(xhr.__napUrl);
         var lastLen = 0;
