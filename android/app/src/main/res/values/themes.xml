@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Thème néon NemApi : fond bleu nuit, accent cyan, pas de barre d'action. -->
+    <style name="NemApiTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/nem_bg</item>
+        <item name="android:colorBackground">@color/nem_bg</item>
+        <item name="android:statusBarColor">@color/nem_bg</item>
+        <item name="android:navigationBarColor">@color/nem_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorAccent">@color/nem_cyan</item>
+        <item name="android:textColorPrimary">@color/nem_text</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Activity</item>
+    </style>
+</resources>

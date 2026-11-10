@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nem_bg">#FF070B14</color>
+    <color name="nem_bg_soft">#FF0A1120</color>
+    <color name="nem_surface">#FF0E1626</color>
+    <color name="nem_surface2">#FF152138</color>
+    <color name="nem_stroke">#FF1F2E47</color>
+    <color name="nem_text">#FFE8EFFB</color>
+    <color name="nem_muted">#FF8A9BB5</color>
+    <color name="nem_cyan">#FF22D3EE</color>
+    <color name="nem_sky">#FF38BDF8</color>
+    <color name="nem_indigo">#FF6366F1</color>
+    <color name="nem_teal">#FF2DD4BF</color>
+    <color name="nem_amber">#FFF5B544</color>
+    <color name="nem_rose">#FFFB7185</color>
+</resources>

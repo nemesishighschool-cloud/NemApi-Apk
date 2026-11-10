@@ -1,0 +1,41 @@
+{
+  "id": "deepseek",
+  "label": "DeepSeek",
+  "enabled": true,
+  "engine": "web-dom",
+  "url": "https://chat.deepseek.com/",
+  "auth": {
+    "mode": "web-session",
+    "login_url": "https://chat.deepseek.com/",
+    "login_markers": ["text=Log in", "text=登录", "input[type=password]"],
+    "challenge_markers": ["text=Verify", "text=验证码", "iframe[src*=captcha]"]
+  },
+  "network": {
+    "observe_paths": ["/api/v0/chat/completion", "/api/v0/chat/completions", "/chat/completion"],
+    "observe_methods": ["POST"],
+    "stream_format": "sse",
+    "done_marker": "[DONE]"
+  },
+  "selectors": {
+    "input": [
+      "textarea#chat-input",
+      "textarea[placeholder*='Message' i]",
+      "div[contenteditable='true'][role='textbox']",
+      "textarea"
+    ],
+    "send": ["button[aria-label*='Send' i]", "[role='button'][class*='ds-icon-button']", "button[type=submit]"],
+    "stop": ["button[aria-label^='Stop' i]", "[aria-label^='Stop' i]"],
+    "generating": ["button[aria-label^='Stop' i]", ".ds-loading"],
+    "assistant_message": ["[data-virtual-list-item-key] .ds-message", ".ds-message"],
+    "login_wall": ["input[type=password]"],
+    "challenge": ["iframe[src*=captcha]"]
+  },
+  "timeouts": {
+    "element_ms": 15000,
+    "submit_ms": 20000,
+    "first_token_ms": 60000,
+    "response_ms": 300000,
+    "stability_ms": 2000
+  },
+  "max_history_chars": 40000
+}
