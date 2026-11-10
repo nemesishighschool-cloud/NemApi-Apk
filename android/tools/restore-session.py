@@ -13,7 +13,7 @@ with open(path, encoding="utf-8") as f:
     cookie = json.load(f)["cookie"]
 
 req = urllib.request.Request(
-    "http://127.0.0.1:8787/api/debug/cookies",
+    "http://127.0.0.1:8090/api/debug/cookies",
     data=json.dumps({"cookie": cookie}).encode(),
     headers={"content-type": "application/json"},
     method="POST",
@@ -23,7 +23,7 @@ with urllib.request.urlopen(req, timeout=20) as r:
 
 # vérification : la page doit être connectée
 req = urllib.request.Request(
-    "http://127.0.0.1:8787/api/debug/eval",
+    "http://127.0.0.1:8090/api/debug/eval",
     data=b'location.href',
     method="POST",
 )

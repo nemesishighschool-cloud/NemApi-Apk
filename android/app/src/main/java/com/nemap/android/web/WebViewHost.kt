@@ -13,6 +13,7 @@ import android.webkit.WebViewClient
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.nemap.android.core.AppState
+import com.nemap.android.core.Cookies
 import com.nemap.android.core.NemLog
 
 /**
@@ -67,6 +68,8 @@ object WebViewHost {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(wv, true)
         }
+        // si le magasin de cookies a été vidé, on remet la copie de réserve
+        Cookies.restoreIfMissing(ctx)
 
         wv.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,

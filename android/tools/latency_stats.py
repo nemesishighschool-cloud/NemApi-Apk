@@ -12,7 +12,7 @@ import statistics
 import time
 import urllib.request
 
-BASE = "http://127.0.0.1:8787"
+BASE = "http://127.0.0.1:8090"
 
 PROMPTS = [
     ("court", "Dis uniquement: bonjour"),

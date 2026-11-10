@@ -11,9 +11,11 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import kotlinx.coroutines.launch
 import com.nemap.android.MainActivity
 import com.nemap.android.api.ApiServer
 import com.nemap.android.core.AppState
+import com.nemap.android.core.Cookies
 import com.nemap.android.core.NemLog
 
 /**
@@ -30,6 +32,7 @@ class BridgeService : Service() {
     }
 
     private var api: ApiServer? = null
+    private var keeper: kotlinx.coroutines.Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -61,11 +64,31 @@ class BridgeService : Service() {
         if (api?.running != true) api?.start()
         AppState.serviceRunning = true
         if (AppState.startedAt == 0L) AppState.startedAt = System.currentTimeMillis()
+        startCookieKeeper()
         NemLog.i("service", "service démarré")
         notifyState("NemApi actif — ${AppState.activeProvider} — port ${AppState.API_PORT}")
     }
 
+    /**
+     * Toutes les 60 s, recopie les cookies du WebView dans les préférences :
+     * une session rafraîchie par le site n'est jamais perdue.
+     */
+    private fun startCookieKeeper() {
+        if (keeper?.isActive == true) return
+        keeper = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            while (true) {
+                try {
+                    Cookies.save(applicationContext)
+                } catch (_: Throwable) {
+                }
+                kotlinx.coroutines.delay(60_000)
+            }
+        }
+    }
+
     private fun stopEverything() {
+        keeper?.cancel()
+        keeper = null
         api?.stop()
         api = null
         AppState.serviceRunning = false

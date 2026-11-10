@@ -143,8 +143,8 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         val body = if (contentLength > 0) String(readN(input, contentLength), Charsets.UTF_8) else ""
 
         when {
-            path == "/" || path == "/index.html" -> redirect(out, "/dashboard")
-            path == "/dashboard" -> sendHtml(out, dashboardHtml())
+            // la racine sert directement le tableau de bord (pas de redirection)
+            path == "/" || path == "/index.html" || path == "/dashboard" -> sendHtml(out, dashboardHtml())
             path == "/api/status" -> sendJson(out, 200, AppState.statusJson())
             path == "/api/logs" -> sendJson(out, 200, "{\"entries\":${NemLog.asJson()}}")
             path == "/api/providers" -> sendJson(out, 200, providersJson())

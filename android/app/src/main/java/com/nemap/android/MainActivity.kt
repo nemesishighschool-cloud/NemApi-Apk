@@ -312,7 +312,7 @@ class MainActivity : Activity() {
                 this,
                 Ui.button(this, "Copier l'URL", accent = Ui.SKY) { Ui.copy(this@MainActivity, vBase.text.toString()) },
                 Ui.button(this, "Dashboard", accent = Ui.TEAL) {
-                    openBrowser("http://127.0.0.1:${AppState.API_PORT}/dashboard")
+                    openBrowser("http://127.0.0.1:${AppState.API_PORT}/")
                 }
             )
         )
@@ -552,6 +552,36 @@ class MainActivity : Activity() {
         return tv
     }
 
+    /** Ligne de mesures sous une bulle : premier token, durée, débit, tokens. */
+    private fun addMetrics(initial: String): TextView {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, dp(this@MainActivity, 6f))
+        }
+        val tv = Ui.text(this, initial, 9.5f, Ui.MUTED, mono = true)
+        row.addView(tv)
+        chatList.addView(row)
+        return tv
+    }
+
+    /** Secondes lisibles (« 2,1 s » → « 1,4 s »). */
+    private fun secs(ms: Long): String = String.format("%.1f s", ms / 1000.0).replace('.', ',')
+
+    /**
+     * « ⏱ 1er token 2,1 s · total 3,4 s · 812 c. · ≈203 tok · 60 tok/s »
+     * Les tokens sont estimés à 4 caractères par token (aucun comptage exact
+     * côté site).
+     */
+    private fun metricsLine(ttftMs: Long, totalMs: Long, chars: Int): String {
+        val tokens = chars / 4
+        // débit mesuré sur la génération seule (on retire l'attente du premier
+        // token, sinon une réponse courte paraît absurdement lente)
+        val genMs = (totalMs - ttftMs).coerceAtLeast(1)
+        val perSec = tokens * 1000.0 / genMs
+        return "⏱ 1er token ${secs(ttftMs)} · total ${secs(totalMs)} · $tokens tok · " +
+            "${String.format("%.0f", perSec)} tok/s"
+    }
+
     private fun scrollChat() {
         chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
     }
@@ -646,22 +676,33 @@ class MainActivity : Activity() {
         updateAttachChip()
 
         val reply = addBubble("· · ·", mine = false)
+        // chronomètre : premier token, débit, volume
+        val t0 = System.currentTimeMillis()
+        var firstAt = 0L
+        val metrics = addMetrics("⏱ en attente du premier token…")
         chatting = true
         scope.launch {
             try {
                 var acc = ""
                 val out = DeepSeek.chat(chatHistory.toList(), onDelta = { d ->
+                    if (firstAt == 0L) firstAt = System.currentTimeMillis()
                     acc += d
                     reply.text = acc
+                    metrics.text = "⏱ ${secs(firstAt - t0)} 1er token · ${secs(System.currentTimeMillis() - t0)} · ${acc.length} c."
                     scrollChat()
                 })
+                val totalMs = System.currentTimeMillis() - t0
+                val ttft = if (firstAt > 0) firstAt - t0 else totalMs
                 reply.text = out.ifEmpty { "(réponse vide)" }
+                metrics.text = metricsLine(ttft, totalMs, out.length)
                 chatHistory.add(Msg("assistant", out))
             } catch (e: NemApiException) {
+                metrics.visibility = View.GONE
                 reply.setTextColor(Ui.ROSE)
                 reply.text = "⚠︎ ${e.code}\n${e.message}"
                 if (chatHistory.isNotEmpty()) chatHistory.removeAt(chatHistory.size - 1)
             } catch (t: Throwable) {
+                metrics.visibility = View.GONE
                 reply.setTextColor(Ui.ROSE)
                 reply.text = "⚠︎ ${t.message}"
                 if (chatHistory.isNotEmpty()) chatHistory.removeAt(chatHistory.size - 1)
@@ -696,7 +737,7 @@ class MainActivity : Activity() {
         vMode.text = AppState.observationMode
         vPage.text = AppState.pageUrl.ifEmpty { "—" }
         vBase.text = "http://$ip:${AppState.API_PORT}/v1"
-        vDash.text = "http://$ip:${AppState.API_PORT}/dashboard"
+        vDash.text = "http://$ip:${AppState.API_PORT}"
 
         val t = AppState.lastTtftMs.get()
         val tot = AppState.lastTotalMs.get()

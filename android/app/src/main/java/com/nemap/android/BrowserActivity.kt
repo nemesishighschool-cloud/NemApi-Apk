@@ -108,6 +108,28 @@ class BrowserActivity : Activity() {
         addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         addView(Ui.pill(this@BrowserActivity, "MODE PC", Ui.INDIGO))
+
+        // quitter le navigateur sans toucher à l'historique de la page
+        addView(Ui.text(this@BrowserActivity, "✕", 15f, Ui.ROSE, mono = true, bold = true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(this@BrowserActivity, 11f), dp(this@BrowserActivity, 5f), dp(this@BrowserActivity, 11f), dp(this@BrowserActivity, 5f))
+            background = Ui.rounded(Ui.alpha(Ui.ROSE, 0x18), 12f, this@BrowserActivity, Ui.alpha(Ui.ROSE, 0x66), 1f)
+            isClickable = true
+            setOnClickListener { leave() }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { leftMargin = dp(this@BrowserActivity, 8f) }
+        })
+    }
+
+    /**
+     * Sortie volontaire : on referme l'écran SANS revenir en arrière dans la
+     * page. Le WebView reste vivant, la conversation affichée reste celle en
+     * cours.
+     */
+    private fun leave() {
+        NemLog.i("dom", "sortie du navigateur (conversation conservée)")
+        finish()
     }
 
     private fun toolbar(): LinearLayout = LinearLayout(this).apply {
@@ -159,7 +181,7 @@ class BrowserActivity : Activity() {
         addView(Ui.text(this@BrowserActivity, "Pilotage", 11f, Ui.CYAN, bold = true).apply {
             setPadding(dp(this@BrowserActivity, 12f), dp(this@BrowserActivity, 7f), dp(this@BrowserActivity, 12f), dp(this@BrowserActivity, 7f))
             background = Ui.rounded(Ui.alpha(Ui.CYAN, 0x16), 12f, this@BrowserActivity, Ui.alpha(Ui.CYAN, 0x55), 1f)
-            setOnClickListener { finish() }
+            setOnClickListener { leave() }
         })
     }
 
@@ -201,7 +223,13 @@ class BrowserActivity : Activity() {
         urlLabel.text = shortUrl(url)
     }
 
+    /**
+     * Le bouton Retour du téléphone quitte le navigateur. Il ne navigue
+     * JAMAIS dans l'historique : revenir en arrière sur chat.deepseek.com
+     * ouvrait une nouvelle conversation, ce qui cassait la session en cours.
+     * La navigation dans la page reste possible avec la flèche ← de la barre.
+     */
     override fun onBackPressed() {
-        goBack()
+        leave()
     }
 }

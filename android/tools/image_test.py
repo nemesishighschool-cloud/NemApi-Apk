@@ -5,7 +5,7 @@ Fabrique une image PNG déterministe (quatre quadrants de couleurs connues),
 l'envoie en `image_url` (data URI base64) et vérifie que la réponse décrit
 bien l'image. Deux passes : stream et non-stream.
 
-Usage : python3 image_test.py [--host 127.0.0.1] [--port 8787]
+Usage : python3 image_test.py [--host 127.0.0.1] [--port 8090]
 """
 import argparse
 import base64
@@ -77,7 +77,7 @@ def request(base, payload, timeout=300):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8787)
+    ap.add_argument("--port", type=int, default=8090)
     args = ap.parse_args()
     base = f"http://{args.host}:{args.port}/v1"
 

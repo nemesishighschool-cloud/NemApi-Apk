@@ -6,7 +6,7 @@ import time
 import urllib.request
 
 prompt = sys.argv[1] if len(sys.argv) > 1 else "Ecris un paragraphe de 120 mots sur la ville de Lome au Togo."
-url = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:8787/v1/chat/completions"
+url = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:8090/v1/chat/completions"
 
 body = json.dumps({"stream": True, "messages": [{"role": "user", "content": prompt}]}).encode()
 req = urllib.request.Request(url, data=body, headers={"content-type": "application/json"})

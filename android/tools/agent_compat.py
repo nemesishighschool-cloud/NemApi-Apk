@@ -10,7 +10,7 @@ API OpenAI locale :
   4. POST /v1/chat/completions  long contexte (fichier source de ~4 000 c.)
   5. POST /v1/responses                     → variante « Responses API »
 
-Usage : python3 agent_compat.py [--host 127.0.0.1] [--port 8787]
+Usage : python3 agent_compat.py [--host 127.0.0.1] [--port 8090]
 """
 import argparse
 import json
@@ -58,7 +58,7 @@ def call(base, path, payload=None, timeout=300):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8787)
+    ap.add_argument("--port", type=int, default=8090)
     args = ap.parse_args()
     base = f"http://{args.host}:{args.port}"
     results = []

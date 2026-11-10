@@ -3,7 +3,7 @@
 Tous les scripts supposent l'app lancée, le service actif et le port forwardé :
 
 ```bash
-adb forward tcp:8787 tcp:8787
+adb forward tcp:8090 tcp:8090
 ```
 
 | Script | Rôle |

@@ -12,8 +12,8 @@ import java.util.concurrent.atomic.AtomicLong
 /** État global du service, lu par l'Activity, la notification, l'API et le dashboard. */
 object AppState {
 
-    const val API_PORT = 8787
-    const val VERSION = "1.0.0"
+    const val API_PORT = 8090
+    const val VERSION = "1.0.1"
 
     @Volatile var serviceRunning = false
     @Volatile var startedAt: Long = 0L
