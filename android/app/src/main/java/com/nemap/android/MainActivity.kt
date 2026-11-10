@@ -60,9 +60,14 @@ class MainActivity : Activity() {
     private lateinit var vTotal: TextView
     private lateinit var vChunks: TextView
     private lateinit var vStats: TextView
-    private lateinit var vQuick: TextView
+    private lateinit var chatScroll: ScrollView
+    private lateinit var chatList: LinearLayout
+    private lateinit var chatInput: android.widget.EditText
+    private lateinit var attachChip: TextView
+    private var pendingImage: ImagePart? = null
+    private val chatHistory = ArrayList<Msg>()
+    private var chatting = false
     private lateinit var logView: TextView
-    private lateinit var promptInput: android.widget.EditText
 
     private val refresh = object : Runnable {
         override fun run() {
@@ -117,7 +122,12 @@ class MainActivity : Activity() {
         root.addView(header())
 
         val content = FrameLayout(this)
-        pages = listOf(scroll(pilotagePage()), scroll(apiPage()), scroll(journalPage()))
+        pages = listOf(
+            scroll(pilotagePage()),
+            chatPage(),
+            scroll(apiPage()),
+            scroll(journalPage())
+        )
         pages.forEach {
             content.addView(it, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
@@ -166,8 +176,9 @@ class MainActivity : Activity() {
         }
         val defs = listOf(
             Triple("Pilotage", "◈", 0),
-            Triple("API", "⌁", 1),
-            Triple("Journal", "≡", 2)
+            Triple("Chat", "✦", 1),
+            Triple("API", "⌁", 2),
+            Triple("Journal", "≡", 3)
         )
         val list = ArrayList<Pair<View, View>>()
         for ((label, glyph, index) in defs) {
@@ -276,22 +287,13 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         page.addView(prov)
 
-        // test rapide
-        val test = Ui.card(this)
-        test.addView(Ui.sectionLabel(this, "Test rapide"))
-        promptInput = Ui.input(this, "Écris un prompt…", "Réponds en une phrase : quel jour sommes-nous ?")
-        test.addView(promptInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        test.addView(Ui.spaceTop(this, dp(this, 10f)))
-        test.addView(
-            Ui.row(
-                this,
-                Ui.button(this, "Envoyer", primary = true) { quickTest(image = false) },
-                Ui.button(this, "Tester une image", accent = Ui.INDIGO) { quickTest(image = true) }
-            )
-        )
-        vQuick = Ui.text(this, "", 11.5f, Ui.SKY, mono = true).apply { setPadding(0, dp(this@MainActivity, 10f), 0, 0) }
-        test.addView(vQuick)
-        page.addView(test)
+        // renvoi vers l'onglet dédié
+        val hint = Ui.card(this)
+        hint.addView(Ui.sectionLabel(this, "Chat"))
+        hint.addView(Ui.text(this, "Les essais se font dans l'onglet Chat : conversation complète, images jointes et réponse en direct.", 11f, Ui.MUTED))
+        hint.addView(Ui.spaceTop(this, dp(this, 10f)))
+        hint.addView(Ui.button(this, "Ouvrir le chat", accent = Ui.CYAN) { select(1) })
+        page.addView(hint)
 
         return page
     }
@@ -426,25 +428,246 @@ class MainActivity : Activity() {
         return ImagePart("image/png", "nemapi-test.png", bos.toByteArray())
     }
 
-    private fun quickTest(image: Boolean) {
-        val prompt = promptInput.text.toString().trim().ifEmpty { "Décris cette image en une phrase." }
-        vQuick.setTextColor(Ui.AMBER)
-        vQuick.text = if (image) "Envoi avec image…" else "Envoi en cours…"
+    // ---- onglet Chat ----------------------------------------------------
+
+    private fun chatPage(): View {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Ui.BG)
+        }
+
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(this@MainActivity, 16f), dp(this@MainActivity, 10f), dp(this@MainActivity, 12f), dp(this@MainActivity, 6f))
+        }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(Ui.text(this, "Chat de test", 14f, Ui.TEXT, bold = true))
+        col.addView(Ui.text(this, "même chemin que l'API · stream direct", 9.5f, Ui.MUTED, mono = true))
+        head.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        head.addView(Ui.text(this, "effacer", 11f, Ui.CYAN, bold = true).apply {
+            setPadding(dp(this@MainActivity, 12f), dp(this@MainActivity, 6f), dp(this@MainActivity, 12f), dp(this@MainActivity, 6f))
+            background = Ui.rounded(Ui.alpha(Ui.CYAN, 0x16), 12f, this@MainActivity, Ui.alpha(Ui.CYAN, 0x55), 1f)
+            setOnClickListener { resetChat() }
+        })
+        root.addView(head)
+
+        chatList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(this@MainActivity, 12f), dp(this@MainActivity, 4f), dp(this@MainActivity, 12f), dp(this@MainActivity, 12f))
+        }
+        chatScroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(chatList)
+        }
+        root.addView(chatScroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
+
+        // pièce jointe en attente
+        attachChip = Ui.text(this, "", 10.5f, Ui.CYAN, mono = true).apply {
+            setPadding(dp(this@MainActivity, 10f), dp(this@MainActivity, 6f), dp(this@MainActivity, 10f), dp(this@MainActivity, 6f))
+            background = Ui.rounded(Ui.alpha(Ui.CYAN, 0x18), 10f, this@MainActivity, Ui.alpha(Ui.CYAN, 0x66), 1f)
+            visibility = View.GONE
+            setOnClickListener { pendingImage = null; updateAttachChip() }
+        }
+        root.addView(attachChip, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            leftMargin = dp(this@MainActivity, 16f)
+            bottomMargin = dp(this@MainActivity, 4f)
+        })
+
+        // barre de saisie
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+            setPadding(dp(this@MainActivity, 10f), dp(this@MainActivity, 8f), dp(this@MainActivity, 10f), dp(this@MainActivity, 10f))
+            setBackgroundColor(Ui.BG_SOFT)
+        }
+        bar.addView(attachButton())
+        chatInput = Ui.input(this, "Message…", "").apply {
+            minLines = 1
+            maxLines = 4
+            setPadding(dp(this@MainActivity, 12f), dp(this@MainActivity, 9f), dp(this@MainActivity, 12f), dp(this@MainActivity, 9f))
+        }
+        bar.addView(chatInput, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            leftMargin = dp(this@MainActivity, 8f)
+            rightMargin = dp(this@MainActivity, 8f)
+        })
+        bar.addView(sendButton())
+        root.addView(bar)
+
+        chatList.addView(welcomeBubble())
+        return root
+    }
+
+    private fun attachButton(): TextView = Ui.text(this, "＋", 20f, Ui.CYAN, mono = true, bold = true).apply {
+        gravity = Gravity.CENTER
+        setPadding(dp(this@MainActivity, 11f), dp(this@MainActivity, 4f), dp(this@MainActivity, 11f), dp(this@MainActivity, 6f))
+        background = Ui.rounded(Ui.alpha(Ui.CYAN, 0x18), 14f, this@MainActivity, Ui.alpha(Ui.CYAN, 0x66), 1f)
+        setOnClickListener { chooseImage() }
+    }
+
+    private fun sendButton(): TextView = Ui.text(this, "↑", 20f, Ui.SURFACE, mono = true, bold = true).apply {
+        gravity = Gravity.CENTER
+        setPadding(dp(this@MainActivity, 13f), dp(this@MainActivity, 4f), dp(this@MainActivity, 13f), dp(this@MainActivity, 6f))
+        background = Ui.ripplePublic(Ui.gradient(this@MainActivity, intArrayOf(Ui.SKY, Ui.INDIGO), 14f), 0x55FFFFFF)
+        setOnClickListener { chatSend() }
+    }
+
+    private fun welcomeBubble(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(this@MainActivity, 14f), dp(this@MainActivity, 12f), dp(this@MainActivity, 14f), dp(this@MainActivity, 14f))
+            background = Ui.gradient(this@MainActivity, intArrayOf(0xFF16233D.toInt(), 0xFF0C1526.toInt()), 18f, Ui.alpha(Ui.SKY, 0x44), 1f)
+        }
+        card.addView(Ui.text(this, "Pose une question, joins une image", 12.5f, Ui.TEXT, bold = true))
+        card.addView(Ui.text(this, "Les réponses passent par la même page DeepSeek que l'API : streaming réel, historique conservé.", 10.5f, Ui.MUTED).apply {
+            setPadding(0, dp(this@MainActivity, 4f), 0, 0)
+        })
+        return card
+    }
+
+    /** Bulle de message ; rend le TextView pour pouvoir le remplir en direct. */
+    private fun addBubble(text: String, mine: Boolean): TextView {
+        val tv = Ui.text(this, text, 13f, if (mine) 0xFF08121F.toInt() else Ui.TEXT)
+        tv.setTextIsSelectable(true)
+        tv.setPadding(dp(this@MainActivity, 13f), dp(this@MainActivity, 10f), dp(this@MainActivity, 13f), dp(this@MainActivity, 10f))
+        val maxW = (resources.displayMetrics.widthPixels * 0.84f).toInt()
+        tv.maxWidth = maxW
+        tv.background = if (mine)
+            Ui.gradient(this, intArrayOf(Ui.SKY, Ui.INDIGO), 16f)
+        else
+            Ui.rounded(Ui.SURFACE, 16f, this, Ui.alpha(Ui.CYAN, 0x44), 1f)
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = if (mine) Gravity.END else Gravity.START
+            setPadding(0, dp(this@MainActivity, 3f), 0, dp(this@MainActivity, 3f))
+        }
+        row.addView(tv)
+        chatList.addView(row)
+        scrollChat()
+        return tv
+    }
+
+    private fun scrollChat() {
+        chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun resetChat() {
+        chatHistory.clear()
+        chatting = false
+        chatList.removeAllViews()
+        chatList.addView(welcomeBubble())
+        pendingImage = null
+        updateAttachChip()
+    }
+
+    private fun updateAttachChip() {
+        val img = pendingImage
+        if (img == null) {
+            attachChip.visibility = View.GONE
+        } else {
+            val ko = (img.bytes.size / 1024.0)
+            attachChip.text = "📎 ${img.name} · ${String.format("%.0f", ko)} Ko   ✕"
+            attachChip.visibility = View.VISIBLE
+        }
+    }
+
+    private fun chooseImage() {
+        val options = arrayOf("Choisir une image…", "Image de test (dégradé néon)")
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Joindre une image")
+            .setItems(options) { _, which ->
+                if (which == 0) {
+                    val i = Intent(Intent.ACTION_GET_CONTENT).apply {
+                        type = "image/*"
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                    }
+                    try {
+                        startActivityForResult(Intent.createChooser(i, "Choisir une image"), 900)
+                    } catch (t: Throwable) {
+                        pendingImage = testImage()
+                        updateAttachChip()
+                    }
+                } else {
+                    pendingImage = testImage()
+                    updateAttachChip()
+                }
+            }
+            .show()
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 900 || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        try {
+            val mime = contentResolver.getType(uri) ?: "image/png"
+            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes == null) {
+                android.widget.Toast.makeText(this, "Image illisible", android.widget.Toast.LENGTH_SHORT).show()
+                return
+            }
+            if (bytes.size > 6 * 1024 * 1024) {
+                android.widget.Toast.makeText(this, "Image trop lourde (max 6 Mo)", android.widget.Toast.LENGTH_LONG).show()
+                return
+            }
+            val ext = when {
+                mime.contains("jpeg") || mime.contains("jpg") -> "jpg"
+                mime.contains("webp") -> "webp"
+                mime.contains("gif") -> "gif"
+                else -> "png"
+            }
+            pendingImage = ImagePart(mime, "photo.$ext", bytes)
+            updateAttachChip()
+        } catch (t: Throwable) {
+            android.widget.Toast.makeText(this, "Lecture impossible : ${t.message}", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun chatSend() {
+        if (chatting) return
+        val text = chatInput.text.toString().trim()
+        val img = pendingImage
+        if (text.isEmpty() && img == null) return
+        val body = text.ifEmpty { "Décris cette image." }
+        val msg = Msg("user", body, if (img != null) listOf(img) else emptyList())
+        chatHistory.add(msg)
+
+        var shown = body
+        if (img != null) shown += "\n📎 " + img.name
+        addBubble(shown, mine = true)
+
+        chatInput.setText("")
+        pendingImage = null
+        updateAttachChip()
+
+        val reply = addBubble("· · ·", mine = false)
+        chatting = true
         scope.launch {
-            val t0 = System.currentTimeMillis()
             try {
-                val imgs = if (image) listOf(testImage()) else emptyList()
-                val ask = if (image) "$prompt (image jointe : un carré dégradé bleu-cyan avec le chiffre 7 et le mot NemApi)" else prompt
-                val out = DeepSeek.chat(listOf(Msg("user", ask, imgs)), onDelta = {})
-                val ms = System.currentTimeMillis() - t0
-                vQuick.setTextColor(Ui.TEAL)
-                vQuick.text = "OK en $ms ms · ${out.length} c.${if (image) " · image jointe" else ""}\n\n${out.take(400)}"
+                var acc = ""
+                val out = DeepSeek.chat(chatHistory.toList(), onDelta = { d ->
+                    acc += d
+                    reply.text = acc
+                    scrollChat()
+                })
+                reply.text = out.ifEmpty { "(réponse vide)" }
+                chatHistory.add(Msg("assistant", out))
             } catch (e: NemApiException) {
-                vQuick.setTextColor(Ui.ROSE)
-                vQuick.text = "Erreur ${e.code} : ${e.message}"
+                reply.setTextColor(Ui.ROSE)
+                reply.text = "⚠︎ ${e.code}\n${e.message}"
+                if (chatHistory.isNotEmpty()) chatHistory.removeAt(chatHistory.size - 1)
             } catch (t: Throwable) {
-                vQuick.setTextColor(Ui.ROSE)
-                vQuick.text = "Erreur : ${t.message}"
+                reply.setTextColor(Ui.ROSE)
+                reply.text = "⚠︎ ${t.message}"
+                if (chatHistory.isNotEmpty()) chatHistory.removeAt(chatHistory.size - 1)
+            } finally {
+                chatting = false
+                scrollChat()
             }
         }
     }

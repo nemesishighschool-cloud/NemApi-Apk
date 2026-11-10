@@ -66,6 +66,10 @@ object Ui {
             if (strokeColor != 0 && strokeDp > 0f) setStroke(dp(ctx, strokeDp), strokeColor)
         }
 
+    /** Effet d'appui réutilisable (également utilisable hors de ce fichier). */
+    fun ripplePublic(content: GradientDrawable, touch: Int): RippleDrawable =
+        RippleDrawable(ColorStateList.valueOf(touch), content, null)
+
     private fun ripple(content: GradientDrawable, touch: Int): RippleDrawable =
         RippleDrawable(ColorStateList.valueOf(touch), content, null)
 
