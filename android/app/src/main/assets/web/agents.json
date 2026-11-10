@@ -1,152 +1,10 @@
 {
  "agents": [
   {
-   "id": "qwen-code",
-   "name": "Qwen Code",
-   "vendor": "Alibaba · QwenLM",
-   "description": "Agent de code en ligne de commande. Il renvoie tout son historique à chaque requête, envoie des requêtes d'arrière-plan (mémoire, suggestions, classifieur…) et écrit de gros fichiers en une seule réponse.",
-   "setup": "Dans ~/.qwen/settings.json (ou les variables OPENAI_*) : baseUrl http://127.0.0.1:8090/v1, modèle deepseek-chat (ou un autre modèle NemApi), clé API NemApi si la protection est active.",
-   "homepage": "https://github.com/QwenLM/qwen-code",
-   "snippet": "export OPENAI_BASE_URL=\"{base}\"\nexport OPENAI_API_KEY=\"nemapi\"       # ta clé NemApi si la protection est active\nexport OPENAI_MODEL=\"deepseek-chat\"  # ou qwen-chat, claude-chat, gemini-chat…\n# Qwen Code est reconnu par son User-Agent (QwenCode/…) : rien à ajouter.\nqwen",
-   "enabled": false,
-   "features": [
-    {
-     "id": "persistent_chat",
-     "label": "Plus de nouvelle URL",
-     "tag": "discussion",
-     "description": "La requête ne rouvre jamais le chat web : l'URL de la discussion reste la même d'un tour à l'autre. Sans cela, chaque requête repartirait d'une discussion vide — et l'agent devrait renvoyer tout son contexte à chaque fois.",
-     "enabled": true
-    },
-    {
-     "id": "incremental_context",
-     "label": "Contexte incrémental",
-     "tag": "contexte",
-     "description": "Le contexte n'est plus renvoyé par l'agent : NemApi compare son historique avec ce que la discussion contient déjà et ne tape que ce qui manque (prompt système, outils, message). Les doublons sont filtrés.",
-     "enabled": true
-    },
-    {
-     "id": "tool_calls",
-     "label": "Appels d'outils",
-     "tag": "outils",
-     "description": "Le tableau « tools » OpenAI de l'agent est transmis au modèle avec son contrat d'appel, et la réponse est renvoyée au format OpenAI tool_calls. Les appels dont le nom est inconnu ne sont pas exécutés.",
-     "enabled": true
-    },
-    {
-     "id": "side_queries_local",
-     "label": "Requêtes annexes en local",
-     "tag": "local",
-     "description": "Les requêtes d'arrière-plan de l'agent (sous-agent mémoire, suggestions de saisie, requêtes structurées respond_in_schema) reçoivent une réponse neutre immédiate, sans rien taper. Le classifieur de sécurité est refusé : l'agent te demande alors ton approbation.",
-     "enabled": true
-    },
-    {
-     "id": "continuation",
-     "label": "Suite automatique des réponses coupées",
-     "tag": "fichiers longs",
-     "description": "Si la réponse s'arrête au milieu d'un appel d'outil (gros fichier), NemApi demande la suite dans la même discussion et recolle les morceaux avant de répondre à l'agent.",
-     "enabled": true
-    },
-    {
-     "id": "keepalive",
-     "label": "Connexion maintenue pendant les longues réponses",
-     "tag": "réseau",
-     "description": "En streaming, l'agent reçoit tout de suite les en-têtes puis un signal toutes les 15 s : il n'abandonne pas une réponse qui prend plusieurs minutes.",
-     "enabled": true
-    }
-   ],
-   "identifiers": [
-    {
-     "kind": "header",
-     "value": "X-NemApi-Agent: qwen-code",
-     "note": "recommandé — reconnu à chaque requête"
-    },
-    {
-     "kind": "user-agent",
-     "value": "QwenCode/…",
-     "note": "automatique"
-    },
-    {
-     "kind": "prompt",
-     "value": "You are Qwen Code",
-     "note": "première requête seulement"
-    }
-   ]
-  },
-  {
-   "id": "monkey-code",
-   "name": "MonkeyCode",
-   "vendor": "chaitin · OhMyAgent",
-   "description": "Agent de code en nuage : la tâche tourne dans un environnement distant, l'agent renvoie tout son historique à chaque tour, écrit des fichiers entiers et enchaîne les appels d'outils.",
-   "setup": "MonkeyCode → Console → Modèles → lier un modèle personnalisé : interface « OpenAI Chat » (ou « OpenAI Responses »), URL de base = l'adresse publique de NemApi terminée par /v1, clé = ta clé NemApi, modèle = deepseek-chat (ou qwen-chat…). Les deux protocoles et l'adresse sans /v1 sont acceptés. MonkeyCode ajoute le chemin lui-même. Évite un nom de modèle contenant « claude » ou « codex » : MonkeyCode choisirait alors un autre protocole que celui de NemApi.",
-   "homepage": "https://github.com/chaitin/MonkeyCode",
-   "snippet": "# MonkeyCode → Console → Modèles → « Lier »\nInterface : OpenAI Chat            # ou OpenAI Responses, les deux marchent\nURL de base : {base}               # MonkeyCode ajoute /chat/completions\nClé API : ta clé NemApi            # laisser vide si la protection est désactivée\nModèle : deepseek-chat            # ou qwen-chat, gemini-chat, glm-chat…\n# Garde le tunnel Cloudflare ouvert : le proxy doit joindre ton poste.\n",
-   "enabled": false,
-   "features": [
-    {
-     "id": "persistent_chat",
-     "label": "Plus de nouvelle URL",
-     "tag": "discussion",
-     "description": "La requête ne rouvre jamais le chat web : la discussion reste ouverte d'un tour à l'autre. Sans cela, chaque tour repartirait d'une discussion vide.",
-     "enabled": true
-    },
-    {
-     "id": "incremental_context",
-     "label": "Contexte incrémental",
-     "tag": "contexte",
-     "description": "Le contexte n'est pas retapé : NemApi compare l'historique envoyé par l'agent avec ce que la discussion contient déjà et ne tape que le message nouveau. Indispensable ici : MonkeyCode renvoie toute la conversation et le contenu des fichiers à chaque tour.",
-     "enabled": true
-    },
-    {
-     "id": "tool_calls",
-     "label": "Appels d'outils",
-     "tag": "outils",
-     "description": "Le tableau « tools » de l'agent est transmis au modèle avec son contrat d'appel, et la réponse revient au format OpenAI tool_calls. Les appels dont le nom est inconnu ne sont pas exécutés.",
-     "enabled": true
-    },
-    {
-     "id": "side_queries_local",
-     "label": "Requêtes annexes en local",
-     "tag": "local",
-     "description": "Les requêtes d'arrière-plan reconnues (titre de session, suggestions, requêtes structurées) reçoivent une réponse immédiate, sans rien taper dans la discussion. Le classifieur de sécurité est refusé : l'agent te demande alors ton approbation.",
-     "enabled": true
-    },
-    {
-     "id": "continuation",
-     "label": "Suite automatique des réponses coupées",
-     "tag": "fichiers longs",
-     "description": "Si la réponse s'arrête au milieu d'un appel d'outil (gros fichier), NemApi demande la suite dans la même discussion et recolle les morceaux avant de répondre à l'agent.",
-     "enabled": true
-    },
-    {
-     "id": "keepalive",
-     "label": "Connexion maintenue pendant les longues réponses",
-     "tag": "réseau",
-     "description": "En streaming, l'agent reçoit les en-têtes tout de suite puis un signal régulier : ni lui ni Cloudflare (100 s de silence → erreur 524) ne coupent une réponse de plusieurs minutes.",
-     "enabled": true
-    }
-   ],
-   "identifiers": [
-    {
-     "kind": "header",
-     "value": "X-NemApi-Agent: monkey-code",
-     "note": "recommandé — reconnu à chaque requête"
-    },
-    {
-     "kind": "user-agent",
-     "value": "ohmyagent…",
-     "note": "automatique"
-    },
-    {
-     "kind": "prompt",
-     "value": "You are OhMyAgent",
-     "note": "première requête seulement"
-    }
-   ]
-  },
-  {
    "id": "nemesis",
    "name": "Nemesis",
    "vendor": "teteekoue · NEMESIS-AGENT",
-   "description": "Agent de code en ligne de commande. Il n'envoie que le message courant (son contexte est géré de son côté) et ses appels d'outils sont écrits en JSON dans un bloc de code.",
+   "description": "Agent de code Nemesis, configurable avec le point de terminaison OpenAI-compatible de NemApi.",
    "setup": "Dans le config.yaml de NEMESIS : section « nemapi » (host 127.0.0.1, port 8090, model deepseek-chat). NemApi reconnaît l'agent via l'en-tête X-NemApi-Agent: nemesis, ou via son prompt système.",
    "homepage": "https://github.com/teteekoue/NEMESIS-AGENT",
    "snippet": "# config.yaml de NEMESIS\nprovider:\n  type: nemapi\n  model: deepseek-chat\n\nnemapi:\n  url: \"{base}\"\n  # token: nemapi-token…   # si la protection API est active\n  # agent: nemesis        # facultatif : en-tête X-NemApi-Agent",
@@ -156,14 +14,14 @@
      "id": "persistent_chat",
      "label": "Discussion unique",
      "tag": "discussion",
-     "description": "La requête ne déclenche jamais l'ouverture d'une nouvelle discussion : l'URL du chat web reste la même et l'agent continue dans la discussion ouverte. C'est le pendant de « Nouvelle discussion à chaque requête » du mode classique.",
+     "description": "La requête ne déclenche jamais l'ouverture d'une nouvelle discussion : l'URL du chat web reste la même et l'agent continue dans la discussion ouverte.",
      "enabled": true
     },
     {
      "id": "native_tool_calls",
      "label": "Appels d'outils natifs",
      "tag": "outils",
-     "description": "Les appels d'outils écrits par l'agent (JSON dans un bloc ```json) sont renvoyés au format OpenAI tool_calls au lieu de rester dans le texte. Le contrat d'outils de NemApi n'est pas réécrit par NemApi : c'est l'agent qui décide du format.",
+     "description": "Les appels d'outils écrits par l'agent (JSON dans un bloc ```json) sont renvoyés au format OpenAI tool_calls au lieu de rester dans le texte.",
      "enabled": true
     }
    ],
@@ -181,6 +39,77 @@
     {
      "kind": "prompt",
      "value": "You are **NEMESIS**",
+     "note": "première requête seulement"
+    }
+   ]
+  },
+  {
+   "id": "qwen-code",
+   "name": "Qwen Code",
+   "vendor": "Alibaba · QwenLM",
+   "description": "Agent de code en terminal, compatible avec l’API OpenAI de NemApi.",
+   "setup": "Dans ~/.qwen/settings.json (ou les variables OPENAI_*) : baseUrl http://127.0.0.1:8090/v1, modèle deepseek-chat (ou un autre modèle NemApi), clé API NemApi si la protection est active.",
+   "homepage": "https://github.com/QwenLM/qwen-code",
+   "snippet": "export OPENAI_BASE_URL=\"{base}\"\nexport OPENAI_API_KEY=\"nemapi\"       # ta clé NemApi si la protection est active\nexport OPENAI_MODEL=\"deepseek-chat\"  # ou qwen-chat, claude-chat, gemini-chat…\n# Qwen Code est reconnu par son User-Agent (QwenCode/…) : rien à ajouter.\nqwen",
+   "enabled": false,
+   "features": [
+    {
+     "id": "persistent_chat",
+     "label": "Plus de nouvelle URL",
+     "tag": "discussion",
+     "description": "Garde la même discussion DeepSeek entre les requêtes Qwen Code.",
+     "enabled": true
+    },
+    {
+     "id": "incremental_context",
+     "label": "Contexte incrémental",
+     "tag": "contexte",
+     "description": "N’envoie que le contexte nouveau et filtre les doublons.",
+     "enabled": true
+    },
+    {
+     "id": "tool_calls",
+     "label": "Appels d'outils",
+     "tag": "outils",
+     "description": "Convertit les appels DSML en tool_calls OpenAI pour Qwen Code.",
+     "enabled": true
+    },
+    {
+     "id": "side_queries_local",
+     "label": "Requêtes annexes en local",
+     "tag": "local",
+     "description": "Répond localement aux requêtes annexes; les contrôles de sécurité restent soumis à validation.",
+     "enabled": true
+    },
+    {
+     "id": "continuation",
+     "label": "Suite automatique des réponses coupées",
+     "tag": "fichiers longs",
+     "description": "Reprend automatiquement une réponse après la limite de sortie.",
+     "enabled": true
+    },
+    {
+     "id": "keepalive",
+     "label": "Connexion maintenue pendant les longues réponses",
+     "tag": "réseau",
+     "description": "Maintient le flux ouvert pendant les réponses longues.",
+     "enabled": true
+    }
+   ],
+   "identifiers": [
+    {
+     "kind": "header",
+     "value": "X-NemApi-Agent: qwen-code",
+     "note": "recommandé — reconnu à chaque requête"
+    },
+    {
+     "kind": "user-agent",
+     "value": "QwenCode/…",
+     "note": "automatique"
+    },
+    {
+     "kind": "prompt",
+     "value": "You are Qwen Code",
      "note": "première requête seulement"
     }
    ]

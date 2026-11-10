@@ -414,12 +414,12 @@
       var nodes = document.querySelectorAll("button,[role='button']");
       for (var i = nodes.length - 1; i >= 0; i--) {
         var el = nodes[i];
-        if (!visible(el) || disabled(el)) continue;
+        if (!visible(el)) continue;
         var label = continueLabel(el);
         if (label)
-          return J({ available: true, label: label });
+          return J({ available: true, enabled: !disabled(el), label: label });
       }
-      return J({ available: false });
+      return J({ available: false, enabled: false });
     },
 
     /** Clique uniquement sur un bouton de reprise explicite (pas sur Envoyer). */

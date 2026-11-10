@@ -190,7 +190,7 @@ object QwenContext {
             if (name.isBlank()) null else "- $name: ${f.optString("description")}\n  parameters: ${canonical(f.opt("parameters") ?: JSONObject())}"
         }
         if (list.isEmpty()) return ""
-        return "You can call tools when they are relevant. Available OpenAI tool definitions:\n" + list.joinToString("\n") +
+        return "You can call tools when they are relevant. Use only the OpenAI tool_calls format described in the system instructions; never emit DSML markup as text. Available OpenAI tool definitions:\n" + list.joinToString("\n") +
             "\nReturn normal text when no tool is needed."
     }
 

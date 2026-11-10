@@ -568,19 +568,27 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
             com.nemap.android.core.WebStore.agentEnabled(context, "qwen-code") &&
             com.nemap.android.core.WebStore.agentFeatureEnabled(context, "qwen-code", "incremental_context")
         val rawTools = root.optJSONArray("tools") ?: root.optJSONArray("functions")
+        val dsmlCorrection = qwen && QwenDsml.annotateToolResults(context, rawMessages)
+        val qwenAdditions = mutableListOf<Msg>()
+        if (qwen && !qwenIncremental && rawTools != null && rawTools.length() > 0) {
+            val toolPrompt = QwenDsml.systemPrompt(rawTools)
+            if (toolPrompt.isNotEmpty()) qwenAdditions += Msg("system", toolPrompt)
+        }
+        if (dsmlCorrection && !qwenIncremental) qwenAdditions += Msg("system", QwenDsml.CORRECTION)
+        val requestMsgs = qwenAdditions + msgs
         val id = "chatcmpl-${seq.incrementAndGet()}"
         val created = System.currentTimeMillis() / 1000
 
         val cancelled = AtomicBoolean(false)
-        val promptChars = msgs.sumOf { it.content.length }
+        val promptChars = requestMsgs.sumOf { it.content.length }
         val imageCount = msgs.sumOf { it.images.size }
         val imageChars = imageCount * 1000   // ~1000 « tokens » par image, estimation
 
         if (!stream) {
             try {
-                val text = runBlocking {
+                val rawText = runBlocking {
                     DeepSeek.chat(
-                        messages = msgs,
+                        messages = requestMsgs,
                         onDelta = { },
                         shouldCancel = { cancelled.get() },
                         context = context,
@@ -589,6 +597,15 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
                         qwenIncremental = qwenIncremental
                     )
                 }
+                val parsed = if (qwen) QwenDsml.parse(rawText, rawTools) else null
+                val text = parsed?.content ?: rawText
+                val assistantMessage = JSONObject().put("role", "assistant")
+                if (parsed != null && parsed.toolCalls.length() > 0) {
+                    QwenDsml.remember(context, parsed.toolCalls)
+                    assistantMessage.put("content", if (text.isEmpty()) JSONObject.NULL else text)
+                        .put("tool_calls", parsed.toolCalls)
+                } else assistantMessage.put("content", text)
+                val hasCalls = parsed != null && parsed.toolCalls.length() > 0
                 val resp = JSONObject()
                     .put("id", id)
                     .put("object", "chat.completion")
@@ -598,12 +615,8 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
                         "choices", JSONArray().put(
                             JSONObject()
                                 .put("index", 0)
-                                .put(
-                                    "message", JSONObject()
-                                        .put("role", "assistant")
-                                        .put("content", text)
-                                )
-                                .put("finish_reason", "stop")
+                                .put("message", assistantMessage)
+                                .put("finish_reason", if (hasCalls) "tool_calls" else "stop")
                         )
                     )
                     .put("usage", usageOf(promptChars, text.length, imageChars))
@@ -661,23 +674,57 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
         writeSse(chunk(JSONObject().put("role", "assistant").put("content", ""), null))
 
         try {
+            val bufferForToolCalls = qwen && rawTools != null && rawTools.length() > 0
+            val streamedText = StringBuilder()
             runBlocking {
                 DeepSeek.chat(
-                    messages = msgs,
+                    messages = requestMsgs,
                     onDelta = { d ->
                         if (firstDeltaAt == 0L) firstDeltaAt = System.currentTimeMillis()
-                        chunks++
-                        chars += d.length
-                        writeSse(chunk(JSONObject().put("content", d), null))
+                        if (bufferForToolCalls) {
+                            streamedText.append(d)
+                        } else {
+                            chunks++
+                            chars += d.length
+                            writeSse(chunk(JSONObject().put("content", d), null))
+                        }
                     },
                     shouldCancel = { cancelled.get() },
                     context = context,
                     rawMessages = rawMessages,
                     tools = rawTools,
-                    qwenIncremental = qwenIncremental
+                    qwenIncremental = qwenIncremental,
+                    onKeepAlive = {
+                        try { out.write(": keep-alive\n\n".toByteArray(Charsets.UTF_8)); out.flush() }
+                        catch (_: Throwable) { cancelled.set(true) }
+                    }
                 )
             }
-            writeSse(chunk(JSONObject(), "stop"))
+            if (bufferForToolCalls) {
+                val rawText = streamedText.toString()
+                val parsed = QwenDsml.parse(rawText, rawTools)
+                if (parsed != null && parsed.toolCalls.length() > 0) {
+                    QwenDsml.remember(context, parsed.toolCalls)
+                    val streamedCalls = JSONArray()
+                    for (i in 0 until parsed.toolCalls.length()) {
+                        val call = JSONObject(parsed.toolCalls.optJSONObject(i)?.toString() ?: "{}")
+                        call.put("index", i)
+                        streamedCalls.put(call)
+                    }
+                    val delta = JSONObject().put("tool_calls", streamedCalls)
+                    if (parsed.content.isNotEmpty()) delta.put("content", parsed.content)
+                    writeSse(chunk(delta, "tool_calls"))
+                    chars += parsed.content.length
+                    chunks++
+                } else {
+                    if (rawText.isNotEmpty()) {
+                        writeSse(chunk(JSONObject().put("content", rawText), null))
+                        chars += rawText.length
+                        chunks++
+                    }
+                    writeSse(chunk(JSONObject(), "stop"))
+                }
+            } else writeSse(chunk(JSONObject(), "stop"))
             writeSse("[DONE]")
             val totalMs = System.currentTimeMillis() - started
             val ttft = if (firstDeltaAt > 0) firstDeltaAt - started else totalMs
@@ -722,7 +769,18 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
                             continue
                         }
                         val itemType = item.optString("type")
-                        if (itemType == "message" || item.has("role")) {
+                        if (itemType == "function_call_output") {
+                            messages.put(JSONObject().put("role", "tool")
+                                .put("tool_call_id", item.optString("call_id"))
+                                .put("content", item.opt("output") ?: ""))
+                        } else if (itemType == "function_call") {
+                            val callId = item.optString("call_id", item.optString("id"))
+                            val call = JSONObject().put("id", callId).put("type", "function")
+                                .put("function", JSONObject().put("name", item.optString("name"))
+                                    .put("arguments", item.optString("arguments", "{}")))
+                            messages.put(JSONObject().put("role", "assistant").put("content", JSONObject.NULL)
+                                .put("tool_calls", JSONArray().put(call)))
+                        } else if (itemType == "message" || item.has("role")) {
                             val role = item.optString("role", "user")
                             val rawContent = item.opt("content")
                             val content = if (rawContent is JSONArray) normalizeResponseParts(rawContent) else rawContent ?: ""
@@ -747,15 +805,27 @@ class ApiServer(private val context: Context, private val port: Int = AppState.A
             chatCompletions(cap, synthetic.toString(), headers)
             val resp = String(sw.toByteArray(), Charsets.UTF_8)
             val json = JSONObject(resp.substringAfter("\r\n\r\n"))
-            val text = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content", "") ?: ""
+            val message = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message") ?: JSONObject()
+            val text = if (message.isNull("content")) "" else message.optString("content", "")
+            val output = JSONArray()
+            if (text.isNotEmpty()) output.put(JSONObject().put("type", "message").put("role", "assistant")
+                .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", text))))
+            val calls = message.optJSONArray("tool_calls")
+            if (calls != null) for (i in 0 until calls.length()) {
+                val call = calls.optJSONObject(i) ?: continue
+                val fn = call.optJSONObject("function") ?: continue
+                output.put(JSONObject().put("id", "fc_${seq.incrementAndGet()}")
+                    .put("type", "function_call").put("status", "completed")
+                    .put("call_id", call.optString("id")).put("name", fn.optString("name"))
+                    .put("arguments", fn.optString("arguments", "{}")))
+            }
+            if (output.length() == 0) output.put(JSONObject().put("type", "message").put("role", "assistant")
+                .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", ""))))
             val outJson = JSONObject()
                 .put("id", "resp_${seq.incrementAndGet()}")
                 .put("object", "response")
                 .put("status", "completed")
-                .put("output", JSONArray().put(
-                    JSONObject().put("type", "message").put("role", "assistant")
-                        .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", text)))
-                ))
+                .put("output", output)
             sendJson(out, 200, outJson.toString())
         } catch (t: Throwable) {
             sendJson(out, 400, errorJson("invalid_request", t.message ?: "requête invalide"))

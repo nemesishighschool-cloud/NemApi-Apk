@@ -9,6 +9,7 @@ adb forward tcp:8090 tcp:8090
 | Script | Rôle |
 |---|---|
 | `test-hook.js` | **obligatoire avant chaque build** — 10 assertions sur le parseur SSE et le filtre d'URL de `hook.js` (`node test-hook.js`) |
+| `test-continue.js` | test DOM synthétique du bouton « Continue » : détecté désactivé, puis cliqué une seule fois lorsqu'il devient actif |
 | `dashboard_test.py` | pages NemApi web originales, assets, endpoints JSON, écritures, absence de contenu conversationnel |
 | `sse_probe.py` | un appel en stream avec la chronologie détaillée des fragments |
 | `api_tests.py` | batterie API : 7 tests (409 `provider_busy`, annulation, gros contexte, `/v1/responses`, 400) |

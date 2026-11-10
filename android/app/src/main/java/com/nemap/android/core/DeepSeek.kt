@@ -81,11 +81,12 @@ object DeepSeek {
         context: Context? = null,
         rawMessages: JSONArray? = null,
         tools: JSONArray? = null,
-        qwenIncremental: Boolean = false
+        qwenIncremental: Boolean = false,
+        onKeepAlive: () -> Unit = {}
     ): String {
         if (!AppState.busy.compareAndSet(false, true)) throw NemApiException.busy()
         try {
-            return run(messages, onDelta, shouldCancel, context, rawMessages, tools, qwenIncremental)
+            return run(messages, onDelta, shouldCancel, context, rawMessages, tools, qwenIncremental, onKeepAlive)
         } finally {
             AppState.busy.set(false)
         }
@@ -98,7 +99,8 @@ object DeepSeek {
         context: Context?,
         rawMessages: JSONArray?,
         tools: JSONArray?,
-        qwenIncremental: Boolean
+        qwenIncremental: Boolean,
+        onKeepAlive: () -> Unit
     ): String {
         if (!com.nemap.android.web.WebViewHost.isCreated) {
             throw NemApiException.notReady("Le navigateur intégré n'est pas ouvert : ouvre l'app NemApi puis l'onglet du provider.")
@@ -158,10 +160,10 @@ object DeepSeek {
         // 4) suivre la réponse, puis actionner « Continue » si le modèle a
         // atteint sa limite de sortie. Chaque reprise ouvre un nouveau flux;
         // son texte est dédoublonné avant d'être envoyé au client OpenAI.
-        var answer = follow(prompt, onDelta, shouldCancel)
+        var answer = follow(prompt, onDelta, shouldCancel, onKeepAlive)
         var continuationCount = 0
         while (continuationCount < MAX_CONTINUATIONS) {
-            val available = waitContinueButton(shouldCancel)
+            val available = waitContinueButton(shouldCancel, if (answer.length >= 6_000) 8_000L else 2_500L, onKeepAlive)
             if (!available) break
             if (isCancelled(shouldCancel)) throw NemApiException.cancelled()
             Engine.resetStream()
@@ -169,13 +171,30 @@ object DeepSeek {
             if (!clicked.optBoolean("ok")) break
             continuationCount++
             NemLog.i("dom", "DeepSeek a affiché « Continue » → reprise ${continuationCount}/${MAX_CONTINUATIONS}")
-            val tail = StringBuilder()
-            follow(prompt, onDelta = { delta -> tail.append(delta) }, shouldCancel = shouldCancel)
             val previous = answer
-            answer = appendContinuation(answer, tail.toString())
-            if (answer.length > previous.length) onDelta(answer.substring(previous.length))
+            val tail = StringBuilder()
+            var overlap: Int? = null
+            var delivered = 0
+            fun flushTail(force: Boolean) {
+                if (overlap == null && (force || tail.length >= 4_000)) {
+                    overlap = continuationOverlap(previous, tail.toString())
+                    val start = minOf(overlap ?: 0, tail.length)
+                    if (tail.length > start) onDelta(tail.substring(start))
+                    delivered = tail.length
+                } else if (overlap != null && tail.length > delivered) {
+                    onDelta(tail.substring(delivered))
+                    delivered = tail.length
+                }
+            }
+            follow(prompt, onDelta = { delta ->
+                tail.append(delta)
+                flushTail(false)
+            }, shouldCancel = shouldCancel, onKeepAlive = onKeepAlive)
+            flushTail(true)
+            val suffix = tail.substring(minOf(overlap ?: 0, tail.length))
+            answer = previous + suffix
         }
-        if (continuationCount == MAX_CONTINUATIONS && waitContinueButton(shouldCancel)) {
+        if (continuationCount == MAX_CONTINUATIONS && waitContinueButton(shouldCancel, 8_000L, onKeepAlive)) {
             NemLog.e("dom", "DeepSeek demande encore une reprise après $MAX_CONTINUATIONS continuations")
             throw NemApiException.timeout("DeepSeek a encore affiché « Continue » après $MAX_CONTINUATIONS reprises. La réponse est interrompue par la limite de sortie de la page.")
         }
@@ -298,29 +317,38 @@ object DeepSeek {
         NemLog.w("dom", "téléversement non confirmé après $UPLOAD_MS ms ($lastNote) — envoi quand même")
     }
 
-    private suspend fun waitContinueButton(shouldCancel: () -> Boolean): Boolean {
-        val deadline = System.currentTimeMillis() + 2_000L
+    private suspend fun waitContinueButton(
+        shouldCancel: () -> Boolean,
+        timeoutMs: Long,
+        onKeepAlive: () -> Unit
+    ): Boolean {
+        val started = System.currentTimeMillis()
+        val deadline = started + timeoutMs
+        var lastKeepAlive = started
         while (System.currentTimeMillis() < deadline) {
             if (isCancelled(shouldCancel)) throw NemApiException.cancelled()
             try {
-                if (Engine.adapter("continueAvailable", timeoutMs = 5_000).optBoolean("available")) return true
+                val status = Engine.adapter("continueAvailable", timeoutMs = 1_500)
+                if (status.optBoolean("available") && status.optBoolean("enabled", true)) return true
             } catch (_: Throwable) {
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastKeepAlive >= 2_000L) {
+                try { onKeepAlive() } catch (_: Throwable) {}
+                lastKeepAlive = now
             }
             delay(250)
         }
         return false
     }
 
-    /** Concatène une reprise en retirant son éventuel recouvrement de début. */
-    private fun appendContinuation(previous: String, next: String): String {
-        if (next.isBlank()) return previous
+    /** Detects overlap against the next continuation's first up-to-4,000 characters. */
+    private fun continuationOverlap(previous: String, next: String): Int {
         val max = minOf(previous.length, next.length, 4_000)
         for (overlap in max downTo 16) {
-            if (previous.regionMatches(previous.length - overlap, next, 0, overlap, ignoreCase = false)) {
-                return previous + next.substring(overlap)
-            }
+            if (previous.regionMatches(previous.length - overlap, next, 0, overlap, ignoreCase = false)) return overlap
         }
-        return previous + next
+        return 0
     }
 
     private suspend fun waitSendReady(budgetMs: Long, shouldCancel: () -> Boolean): Boolean {
@@ -337,9 +365,11 @@ object DeepSeek {
     private suspend fun follow(
         prompt: String,
         onDelta: (String) -> Unit,
-        shouldCancel: () -> Boolean
+        shouldCancel: () -> Boolean,
+        onKeepAlive: () -> Unit = {}
     ): String {
         val t0 = System.currentTimeMillis()
+        var lastKeepAlive = t0
         var acc = ""
         var mode = "hook"
         var lastDom = ""
@@ -352,6 +382,10 @@ object DeepSeek {
                 throw NemApiException.cancelled()
             }
             val now = System.currentTimeMillis()
+            if (now - lastKeepAlive >= 10_000L) {
+                try { onKeepAlive() } catch (_: Throwable) {}
+                lastKeepAlive = now
+            }
 
             if (mode == "hook") {
                 val st = Engine.streamState()

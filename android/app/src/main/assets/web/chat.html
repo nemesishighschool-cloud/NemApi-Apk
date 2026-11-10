@@ -31,8 +31,8 @@
         <div class="chat-body" id="chat-body"></div>
         <div class="attach-row" id="chat-attach-row"></div>
         <div class="chat-input">
-          <input type="file" id="chat-file" accept="image/*" multiple hidden>
-          <button class="btn attach-btn" id="chat-attach" type="button" title="Joindre une image (envoyée en image_url, format OpenAI)" aria-label="Joindre une image"></button>
+          <input type="file" id="chat-file" accept="image/*,application/pdf,.pdf" multiple hidden>
+          <button class="btn attach-btn" id="chat-attach" type="button" title="Joindre une image ou un PDF" aria-label="Joindre une image ou un PDF"></button>
           <textarea id="chat-input" class="input" rows="1" placeholder="Message… (Entrée pour envoyer, Maj+Entrée pour une nouvelle ligne, Ctrl+V pour coller une capture)"></textarea>
           <button class="btn btn-primary" id="chat-send" type="button">Envoyer</button>
         </div>
@@ -82,11 +82,19 @@ function addMsg(role, text, images) {
     const thumbs = document.createElement("div");
     thumbs.className = "thumbs";
     for (const img of images) {
-      const el = document.createElement("img");
-      el.src = img.url;
-      el.alt = img.name || "image";
-      el.title = img.name || "";
-      thumbs.appendChild(el);
+      if (img.type === "application/pdf" || /\.pdf$/i.test(img.name || "")) {
+        const el = document.createElement("div");
+        el.textContent = "📄 " + (img.name || "document.pdf");
+        el.title = "PDF joint (fichier original)";
+        el.style.cssText = "padding:10px 14px;border:1px solid #64748b;border-radius:8px;max-width:280px;overflow-wrap:anywhere";
+        thumbs.appendChild(el);
+      } else {
+        const el = document.createElement("img");
+        el.src = img.url;
+        el.alt = img.name || "image";
+        el.title = img.name || "";
+        thumbs.appendChild(el);
+      }
     }
     div.appendChild(thumbs);
   }
@@ -96,10 +104,9 @@ function addMsg(role, text, images) {
 }
 
 /* ---------------------------------------------------------------- attachments */
-// OpenAI multimodal format: the image goes in the message as an image_url
-// part (base64 data URL). The proxy forwards it to the extension, which
-// uploads it through the provider's own file input.
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+// Send images as image_url and PDFs as one native application/pdf file part.
+// PDF bytes remain untouched; DeepSeek Web processes the original file.
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 let pendingImages = [];
 
 function humanSize(n) {
@@ -114,8 +121,10 @@ function renderAttachments() {
   pendingImages.forEach((img, i) => {
     const chip = document.createElement("div");
     chip.className = "attach-chip";
-    chip.innerHTML = `<img alt=""><div class="meta"><span class="name"></span><span class="size"></span></div><button class="rm" type="button" title="Retirer">×</button>`;
-    chip.querySelector("img").src = img.url;
+    chip.innerHTML = `<span class="file-icon"></span><div class="meta"><span class="name"></span><span class="size"></span></div><button class="rm" type="button" title="Retirer">×</button>`;
+    const icon = chip.querySelector(".file-icon");
+    if (img.type === "application/pdf") icon.textContent = "📄";
+    else { const preview = document.createElement("img"); preview.src = img.url; preview.alt = ""; icon.replaceWith(preview); }
     chip.querySelector(".name").textContent = img.name;
     chip.querySelector(".size").textContent = humanSize(img.size);
     chip.querySelector(".rm").addEventListener("click", () => {
@@ -137,21 +146,23 @@ function readAsDataURL(file) {
 
 async function addFiles(fileList) {
   for (const file of Array.from(fileList || [])) {
-    if (!/^image\//.test(file.type)) {
-      toast(`${file.name} : seules les images sont acceptées`, "error");
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+    const isImage = /^image\//.test(file.type);
+    if (!isImage && !isPdf) {
+      toast(`${file.name} : seuls les fichiers image et PDF sont acceptés`, "error");
       continue;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
-      toast(`${file.name} : trop lourd (max ${humanSize(MAX_IMAGE_BYTES)})`, "error");
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      toast(`${file.name} : trop lourd (max ${humanSize(MAX_ATTACHMENT_BYTES)})`, "error");
       continue;
     }
     if (pendingImages.length >= 8) {
-      toast("Maximum 8 images par message", "error");
+      toast("Maximum 8 pièces jointes par message", "error");
       break;
     }
     try {
       const url = await readAsDataURL(file);
-      pendingImages.push({ url, name: file.name, size: file.size });
+      pendingImages.push({ url, name: file.name, size: file.size, type: isPdf ? "application/pdf" : file.type });
     } catch (e) {
       toast(`${file.name} : ${e.message}`, "error");
     }
@@ -165,7 +176,7 @@ $("chat-file").addEventListener("change", async (e) => {
   await addFiles(e.target.files);
   e.target.value = "";  // same file can be picked again
 });
-// drag & drop of images onto the conversation
+// Drag and drop of images or PDFs onto the conversation
 ["dragover", "drop"].forEach((type) =>
   $("chat-body").addEventListener(type, (e) => {
     e.preventDefault();
@@ -222,7 +233,7 @@ async function send() {
   $("chat-input").value = "";
   pendingImages = [];
   renderAttachments();
-  addMsg("user", text || "(image)", images);
+  addMsg("user", text || (images.some((f) => f.type === "application/pdf") ? "(PDF joint)" : "(image)"), images);
   const el = addMsg("assistant", "");
   const content = el.querySelector(".content");
   content.innerHTML = '<span class="cursor"></span>';
@@ -234,7 +245,9 @@ async function send() {
   const userContent = images.length
     ? [
         ...(text ? [{ type: "text", text }] : []),
-        ...images.map((img) => ({ type: "image_url", image_url: { url: img.url }, filename: img.name })),
+        ...images.map((img) => img.type === "application/pdf"
+          ? { type: "file", file: { filename: img.name, file_data: img.url, mime_type: "application/pdf" } }
+          : { type: "image_url", image_url: { url: img.url }, filename: img.name }),
       ]
     : text;
   const messages = [...(system ? [{ role: "system", content: system }] : []), ...chatHistory, { role: "user", content: userContent }];

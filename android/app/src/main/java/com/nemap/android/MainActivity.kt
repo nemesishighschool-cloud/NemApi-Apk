@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -522,7 +523,7 @@ class MainActivity : Activity() {
             setPadding(dp(this@MainActivity, 14f), dp(this@MainActivity, 12f), dp(this@MainActivity, 14f), dp(this@MainActivity, 14f))
             background = Ui.gradient(this@MainActivity, intArrayOf(0xFF16233D.toInt(), 0xFF0C1526.toInt()), 18f, Ui.alpha(Ui.SKY, 0x44), 1f)
         }
-        card.addView(Ui.text(this, "Pose une question, joins une image", 12.5f, Ui.TEXT, bold = true))
+        card.addView(Ui.text(this, "Pose une question, joins une image ou un PDF", 12.5f, Ui.TEXT, bold = true))
         card.addView(Ui.text(this, "Les réponses passent par la même page DeepSeek que l'API : streaming réel, historique conservé.", 10.5f, Ui.MUTED).apply {
             setPadding(0, dp(this@MainActivity, 4f), 0, 0)
         })
@@ -607,17 +608,18 @@ class MainActivity : Activity() {
     }
 
     private fun chooseImage() {
-        val options = arrayOf("Choisir une image…", "Image de test (dégradé néon)")
+        val options = arrayOf("Choisir une image ou un PDF…", "Image de test (dégradé néon)")
         android.app.AlertDialog.Builder(this)
-            .setTitle("Joindre une image")
+            .setTitle("Joindre un fichier")
             .setItems(options) { _, which ->
                 if (which == 0) {
-                    val i = Intent(Intent.ACTION_GET_CONTENT).apply {
-                        type = "image/*"
+                    val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        type = "*/*"
+                        putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "application/pdf"))
                         addCategory(Intent.CATEGORY_OPENABLE)
                     }
                     try {
-                        startActivityForResult(Intent.createChooser(i, "Choisir une image"), 900)
+                        startActivityForResult(Intent.createChooser(i, "Choisir une image ou un PDF"), 900)
                     } catch (t: Throwable) {
                         pendingImage = testImage()
                         updateAttachChip()
@@ -635,23 +637,39 @@ class MainActivity : Activity() {
         if (requestCode != 900 || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         try {
-            val mime = contentResolver.getType(uri) ?: "image/png"
+            val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }.orEmpty()
+            val detectedMime = contentResolver.getType(uri).orEmpty()
+            val isPdf = detectedMime.contains("pdf", true) || name.endsWith(".pdf", true)
+            val isImage = detectedMime.startsWith("image/")
+            if (!isPdf && !isImage) {
+                android.widget.Toast.makeText(this, "Format non pris en charge : choisis une image ou un PDF", android.widget.Toast.LENGTH_LONG).show()
+                return
+            }
             val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
             if (bytes == null) {
-                android.widget.Toast.makeText(this, "Image illisible", android.widget.Toast.LENGTH_SHORT).show()
+                android.widget.Toast.makeText(this, "Fichier illisible", android.widget.Toast.LENGTH_SHORT).show()
                 return
             }
-            if (bytes.size > 6 * 1024 * 1024) {
-                android.widget.Toast.makeText(this, "Image trop lourde (max 6 Mo)", android.widget.Toast.LENGTH_LONG).show()
+            val maxBytes = if (isPdf) 20 * 1024 * 1024 else 6 * 1024 * 1024
+            if (bytes.size > maxBytes) {
+                val limit = if (isPdf) "20 Mo" else "6 Mo"
+                android.widget.Toast.makeText(this, "Fichier trop lourd (max $limit)", android.widget.Toast.LENGTH_LONG).show()
                 return
             }
-            val ext = when {
-                mime.contains("jpeg") || mime.contains("jpg") -> "jpg"
-                mime.contains("webp") -> "webp"
-                mime.contains("gif") -> "gif"
-                else -> "png"
+            if (isPdf) {
+                val pdfName = name.ifBlank { "document.pdf" }
+                pendingImage = ImagePart("application/pdf", pdfName, bytes)
+            } else {
+                val ext = when {
+                    detectedMime.contains("jpeg") || detectedMime.contains("jpg") -> "jpg"
+                    detectedMime.contains("webp") -> "webp"
+                    detectedMime.contains("gif") -> "gif"
+                    else -> "png"
+                }
+                pendingImage = ImagePart(detectedMime.ifBlank { "image/png" }, name.ifBlank { "photo.$ext" }, bytes)
             }
-            pendingImage = ImagePart(mime, "photo.$ext", bytes)
             updateAttachChip()
         } catch (t: Throwable) {
             android.widget.Toast.makeText(this, "Lecture impossible : ${t.message}", android.widget.Toast.LENGTH_LONG).show()
@@ -663,7 +681,7 @@ class MainActivity : Activity() {
         val text = chatInput.text.toString().trim()
         val img = pendingImage
         if (text.isEmpty() && img == null) return
-        val body = text.ifEmpty { "Décris cette image." }
+        val body = text.ifEmpty { if (img?.mime == "application/pdf") "Analyse le fichier PDF joint." else "Décris cette image." }
         val msg = Msg("user", body, if (img != null) listOf(img) else emptyList())
         chatHistory.add(msg)
 

@@ -1,5 +1,14 @@
 # Changelog — NemApi Android
 
+## 1.1.1 — 2026-11-10
+
+- Qwen Code seulement : conversion des appels d’outils DSML en `tool_calls` OpenAI compatibles, avec rappel correctif joint au résultat d’outil.
+- Les réponses longues restent diffusées pendant les reprises « Continue »; chevauchement dédoublonné et keep-alive SSE.
+- Dashboard : intégrations limitées à Nemesis puis Qwen Code, descriptions simplifiées.
+- Chat dashboard et APK : pièces jointes PDF natives, fichier original transmis en un seul `application/pdf`.
+
+APK : `NemApi-1.1.1.apk` — `versionCode 7`, `versionName 1.1.1`.
+
 ## 1.1.0 — 2026-11-10
 
 - Ajout du contexte incrémental Qwen Code : détection par User-Agent/en-tête, contexte initial complet puis deltas des tours suivants.
