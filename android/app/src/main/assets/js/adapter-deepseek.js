@@ -115,13 +115,34 @@
 
   function continueLabel(el) {
     if (!el) return "";
-    var accept = /^(continue|continue generating|continue response|continue generation|继续|继续生成|继续回答)$/i;
-    var candidates = [el.innerText, el.textContent, el.getAttribute("aria-label"), el.getAttribute("title")];
+    var accept = /^(?:continue(?:\s+(?:generating|response|generation|the response))?|continue generating response|continuer(?:\s+(?:la génération|la reponse|la réponse|génération|réponse))?|poursuivre(?:\s+(?:la génération|la réponse))?|reprendre(?:\s+(?:la génération|la réponse))?|继续|继续生成|继续回答)$/i;
+    var candidates = [
+      el.getAttribute && el.getAttribute("aria-label"),
+      el.getAttribute && el.getAttribute("title"),
+      el.getAttribute && el.getAttribute("data-testid"),
+      el.innerText,
+      el.textContent
+    ];
     for (var i = 0; i < candidates.length; i++) {
-      var label = String(candidates[i] || "").replace(/\s+/g, " ").trim();
+      var label = String(candidates[i] || "").replace(/[.…]+$/g, "").replace(/\s+/g, " ").trim();
       if (accept.test(label)) return label;
+      if (i === 2 && /(?:^|[-_ ])continue(?:[-_ ]|$)/i.test(label)) return "Continue";
     }
+    var cls = String(el.className || "");
+    if (/(?:^|[-_ ])continue(?:[-_ ]|$)/i.test(cls)) return "Continue";
     return "";
+  }
+
+  function continueNodes() {
+    try {
+      return document.querySelectorAll(
+        "button,[role='button'],[aria-label*='continue' i],[aria-label*='continuer' i]," +
+          "[title*='continue' i],[title*='continuer' i],[data-testid*='continue' i]," +
+          "[data-testid*='continuer' i],[class*='continue' i],[class*='continuer' i]"
+      );
+    } catch (e) {
+      return document.querySelectorAll("button,[role='button'],[class*='continue']");
+    }
   }
 
   function isSendButton(el) {
@@ -411,26 +432,26 @@
 
     /** Détecte le bouton de reprise laissé par DeepSeek après la limite de sortie. */
     continueAvailable: function () {
-      var nodes = document.querySelectorAll("button,[role='button']");
+      var nodes = continueNodes();
       for (var i = nodes.length - 1; i >= 0; i--) {
         var el = nodes[i];
         if (!visible(el)) continue;
         var label = continueLabel(el);
         if (label)
-          return J({ available: true, enabled: !disabled(el), label: label });
+          return J({ available: true, enabled: !disabled(el), label: label, tag: el.tagName || "" });
       }
       return J({ available: false, enabled: false });
     },
 
-    /** Clique uniquement sur un bouton de reprise explicite (pas sur Envoyer). */
+    /** Clique uniquement sur une action de reprise explicite (pas sur Envoyer). */
     continueGeneration: function () {
-      var nodes = document.querySelectorAll("button,[role='button']");
+      var nodes = continueNodes();
       for (var i = nodes.length - 1; i >= 0; i--) {
         var el = nodes[i];
         if (!visible(el) || disabled(el)) continue;
         var label = continueLabel(el);
         if (label) {
-          try { el.click(); return J({ ok: true, label: label }); } catch (e) {}
+          try { el.click(); return J({ ok: true, label: label, tag: el.tagName || "" }); } catch (e) {}
         }
       }
       return J({ ok: false, reason: "continue_missing" });

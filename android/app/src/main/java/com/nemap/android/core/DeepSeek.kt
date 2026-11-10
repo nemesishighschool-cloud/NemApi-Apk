@@ -26,7 +26,7 @@ object DeepSeek {
 
     private const val ELEMENT_MS = 15_000L
     private const val FIRST_TOKEN_MS = 60_000L
-    private const val RESPONSE_MS = 300_000L
+    private const val RESPONSE_MS = 1_800_000L // long streams may include several slow model phases
     private const val STABILITY_MS = 2_000L
     private const val POLL_MS = 250L
     /** Plafond de sécurité, plus jamais atteint en pratique (voir waitUpload). */
@@ -35,7 +35,7 @@ object DeepSeek {
     private const val UPLOAD_SILENCE_MS = 3_000L
     /** Taille d'un morceau de base64 transféré par evaluateJavascript. */
     private const val CHUNK = 96_000
-    private const val MAX_CONTINUATIONS = 12
+    private const val MAX_CONTINUATIONS = 64
 
     /** Construit le prompt envoyé à la page à partir de l'historique OpenAI. */
     fun buildPrompt(messages: List<Msg>): String {
@@ -171,28 +171,10 @@ object DeepSeek {
             if (!clicked.optBoolean("ok")) break
             continuationCount++
             NemLog.i("dom", "DeepSeek a affiché « Continue » → reprise ${continuationCount}/${MAX_CONTINUATIONS}")
-            val previous = answer
-            val tail = StringBuilder()
-            var overlap: Int? = null
-            var delivered = 0
-            fun flushTail(force: Boolean) {
-                if (overlap == null && (force || tail.length >= 4_000)) {
-                    overlap = continuationOverlap(previous, tail.toString())
-                    val start = minOf(overlap ?: 0, tail.length)
-                    if (tail.length > start) onDelta(tail.substring(start))
-                    delivered = tail.length
-                } else if (overlap != null && tail.length > delivered) {
-                    onDelta(tail.substring(delivered))
-                    delivered = tail.length
-                }
-            }
-            follow(prompt, onDelta = { delta ->
-                tail.append(delta)
-                flushTail(false)
-            }, shouldCancel = shouldCancel, onKeepAlive = onKeepAlive)
-            flushTail(true)
-            val suffix = tail.substring(minOf(overlap ?: 0, tail.length))
-            answer = previous + suffix
+            val tail = ContinuationTail(answer, onDelta)
+            follow(prompt, onDelta = tail::append, shouldCancel = shouldCancel, onKeepAlive = onKeepAlive)
+            tail.finish()
+            answer = tail.fullText()
         }
         if (continuationCount == MAX_CONTINUATIONS && waitContinueButton(shouldCancel, 8_000L, onKeepAlive)) {
             NemLog.e("dom", "DeepSeek demande encore une reprise après $MAX_CONTINUATIONS continuations")
@@ -324,31 +306,31 @@ object DeepSeek {
     ): Boolean {
         val started = System.currentTimeMillis()
         val deadline = started + timeoutMs
+        var disabledDeadline = 0L
         var lastKeepAlive = started
-        while (System.currentTimeMillis() < deadline) {
+        while (true) {
+            val now = System.currentTimeMillis()
+            if (now >= deadline && (disabledDeadline == 0L || now >= disabledDeadline)) break
             if (isCancelled(shouldCancel)) throw NemApiException.cancelled()
             try {
                 val status = Engine.adapter("continueAvailable", timeoutMs = 1_500)
-                if (status.optBoolean("available") && status.optBoolean("enabled", true)) return true
+                if (status.optBoolean("available")) {
+                    if (status.optBoolean("enabled", true)) return true
+                    if (disabledDeadline == 0L) {
+                        disabledDeadline = now + 20_000L
+                        NemLog.i("dom", "action « Continue » détectée mais encore désactivée — attente de son activation")
+                    }
+                }
             } catch (_: Throwable) {
             }
-            val now = System.currentTimeMillis()
             if (now - lastKeepAlive >= 2_000L) {
                 try { onKeepAlive() } catch (_: Throwable) {}
                 lastKeepAlive = now
             }
             delay(250)
         }
+        if (disabledDeadline != 0L) NemLog.w("dom", "action « Continue » restée désactivée pendant 20 s")
         return false
-    }
-
-    /** Detects overlap against the next continuation's first up-to-4,000 characters. */
-    private fun continuationOverlap(previous: String, next: String): Int {
-        val max = minOf(previous.length, next.length, 4_000)
-        for (overlap in max downTo 16) {
-            if (previous.regionMatches(previous.length - overlap, next, 0, overlap, ignoreCase = false)) return overlap
-        }
-        return 0
     }
 
     private suspend fun waitSendReady(budgetMs: Long, shouldCancel: () -> Boolean): Boolean {
@@ -375,6 +357,7 @@ object DeepSeek {
         var lastDom = ""
         var stableSince = 0L
         var sawStream = false
+        var lastContinueCheck = 0L
 
         while (true) {
             if (isCancelled(shouldCancel)) {
@@ -441,6 +424,33 @@ object DeepSeek {
                         onDelta(lastDom.substring(minOf(acc.length, lastDom.length)))
                         acc = lastDom
                     }
+                    break
+                }
+            }
+
+            // Continue may appear before the network wrapper reports [DONE].
+            // Watch for it during the stream so a slow finalization cannot leave
+            // the client hanging until its own read timeout.
+            if ((sawStream || mode == "dom") && now - lastContinueCheck >= 750L) {
+                lastContinueCheck = now
+                val continuation = try { Engine.adapter("continueAvailable", timeoutMs = 1_000) } catch (_: Throwable) { JSONObject() }
+                if (continuation.optBoolean("available") && continuation.optBoolean("enabled", true)) {
+                    if (mode == "hook") {
+                        val latest = Engine.streamState()
+                        val latestText = latest.optString("text", "")
+                        if (latestText.length > acc.length) {
+                            onDelta(latestText.substring(acc.length))
+                            acc = latestText
+                        }
+                    } else {
+                        val latest = Engine.adapter("answer")
+                        val latestText = if (latest.optBoolean("ok")) latest.optString("text", "") else ""
+                        if (latestText.length > acc.length) {
+                            onDelta(latestText.substring(acc.length))
+                            acc = latestText
+                        }
+                    }
+                    NemLog.i("dom", "action « Continue » active détectée pendant le flux → reprise immédiate")
                     break
                 }
             }

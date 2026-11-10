@@ -11,8 +11,8 @@ android {
         applicationId "com.nemap.android"
         minSdk 26
         targetSdk 34
-        versionCode 7
-        versionName "1.1.1"
+        versionCode 8
+        versionName "1.1.2"
     }
 
     buildTypes {
@@ -46,4 +46,5 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0'
     implementation 'androidx.webkit:webkit:1.11.0'
     implementation 'androidx.core:core-ktx:1.13.1'
+    testImplementation 'junit:junit:4.13.2'
 }

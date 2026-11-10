@@ -1,5 +1,14 @@
 # Changelog — NemApi Android
 
+## 1.1.2 — 2026-11-10
+
+- Reprise « Continue » plus robuste : repérage DOM ciblé et élargi (libellés, attributs, classes et variantes linguistiques), surveillance pendant le flux et attente de l'activation du bouton.
+- Flux SSE conservé par keep-alive pendant l'attente; fenêtre par segment prolongée à 30 minutes et garde de sécurité relevée à 64 reprises automatiques.
+- La reprise dédoublonne le chevauchement sans mettre systématiquement en tampon les 4 000 premiers caractères : le nouveau texte est diffusé dès que l'ambiguïté est levée.
+- Tests de régression renforcés pour les actions Continue en anglais/français, désactivées/masquées et signalées par attribut/classe.
+
+APK : `NemApi-1.1.2.apk` — `versionCode 8`, `versionName 1.1.2`.
+
 ## 1.1.1 — 2026-11-10
 
 - Qwen Code seulement : conversion des appels d’outils DSML en `tool_calls` OpenAI compatibles, avec rappel correctif joint au résultat d’outil.
