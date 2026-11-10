@@ -13,3 +13,6 @@ captures/
 # outils
 __pycache__/
 *.pyc
+
+# Kotlin/Gradle diagnostics
+.kotlin/
